@@ -55,7 +55,7 @@ export class Bot {
   private desiredYaw = 0;
 
   constructor(public s: Soldier, public game: Game, seed: number) {
-    this.skill = 0.62 + (seed % 7) * 0.05;
+    this.skill = 0.42 + (seed % 7) * 0.045;
     this.thinkAt = Math.random() * 0.3;
     this.strafe = Math.random() < 0.5 ? 1 : -1;
   }
@@ -96,7 +96,7 @@ export class Bot {
       if (vis && g.smokeBlocks(ex, eyeY, ez, e.pos.x, e.pos.y + 1.2, e.pos.z)) vis = false;
       const k = this.known.get(e.id);
       if (vis) {
-        if (!k) this.reactAt = g.time + (0.35 + (1 - this.skill) * 0.5) * (d > 25 ? 1.2 : 1);
+        if (!k) this.reactAt = g.time + (0.6 + (1 - this.skill) * 0.8 + Math.random() * 0.25) * (d > 25 ? 1.3 : 1);
         this.known.set(e.id, { s: e, x: e.pos.x, z: e.pos.z, t: g.time, visible: true });
         g.reportSighting(s.team, e);
       } else if (k) k.visible = false;
@@ -288,8 +288,8 @@ export class Bot {
     const s = this.s;
     this.trackT += dt;
     // aim error shrinks while tracking
-    const e = (1.6 - this.skill) * Math.exp(-this.trackT * 1.6 * this.skill) * err + 0.08 * (1 - this.skill);
-    if (Math.random() < dt * 4) this.aimErr.set((Math.random() - 0.5) * 2, (Math.random() - 0.5) * 0.6, (Math.random() - 0.5) * 2).multiplyScalar(e);
+    const e = (2.3 - this.skill) * Math.exp(-this.trackT * 0.9 * this.skill) * err + 0.3 * (1.1 - this.skill);
+    if (Math.random() < dt * 4) this.aimErr.set((Math.random() - 0.5) * 2, (Math.random() - 0.5) * 0.9, (Math.random() - 0.5) * 2).multiplyScalar(e);
     this.lookAt.set(x + this.aimErr.x, y + this.aimErr.y, z + this.aimErr.z);
     this.desiredYaw = Math.atan2(this.lookAt.x - s.pos.x, this.lookAt.z - s.pos.z);
   }
@@ -590,7 +590,7 @@ export class Bot {
     // ---- turn toward look target at a human-ish rate
     const curYaw = Math.atan2(it.aim.x - p.x, it.aim.z - p.z);
     const dy = angleDiff(curYaw, this.desiredYaw);
-    const maxTurn = (5 + this.skill * 5) * dt;
+    const maxTurn = (3.2 + this.skill * 3.6) * dt;
     const ny = curYaw + clamp(dy, -maxTurn, maxTurn);
     if (!it.useItem || this.lookAt.lengthSq() === 0) {
       const dist = Math.max(2, Math.hypot(this.lookAt.x - p.x, this.lookAt.z - p.z));
@@ -615,7 +615,7 @@ export class Bot {
     if (g.time < this.pauseUntil) return false;
     if (!st.auto) {
       // tap fire semi-autos with human cadence
-      if (Math.random() < dt * (3 + this.skill * 3)) {
+      if (Math.random() < dt * (1.8 + this.skill * 2.2)) {
         this.pauseUntil = g.time + 60 / st.rpm + 0.05;
         return true;
       }
@@ -626,7 +626,7 @@ export class Bot {
       if (st.spinUp > 0) this.burstLeft += 1.2;
     }
     this.burstLeft -= dt;
-    if (this.burstLeft <= 0) this.pauseUntil = g.time + 0.15 + Math.random() * 0.35;
+    if (this.burstLeft <= 0) this.pauseUntil = g.time + 0.3 + Math.random() * 0.5;
     return true;
   }
 

@@ -76,8 +76,8 @@ export interface MatchOptions {
   difficulty: Difficulty;
   minutes: number;
 }
-/** bot skill shift per difficulty (base skills sit around 0.62..0.92) */
-const DIFF_SKILL: Record<Difficulty, number> = { recruit: -0.24, regular: 0, veteran: 0.2 };
+/** bot skill shift per difficulty (base skills sit around 0.42..0.69) */
+const DIFF_SKILL: Record<Difficulty, number> = { recruit: -0.22, regular: 0, veteran: 0.18 };
 
 const BOT_NAMES = ['Viper', 'Maple', 'Kodiak', 'Juno', 'Rook', 'Sable', 'Fennec', 'Nova', 'Bishop', 'Wren', 'Atlas', 'Moss', 'Echo', 'Pike', 'Tundra', 'Quill', 'Hawk', 'Birch'];
 
@@ -189,7 +189,9 @@ export class Game {
       const lo = randomLoadout(this.rng, prefs[i]);
       const s = new Soldier(names[i], team, false, lo);
       const b = new Bot(s, this, i * 13 + 5);
-      b.skill = Math.min(1, Math.max(0.3, b.skill + DIFF_SKILL[this.options.difficulty]));
+      b.skill = Math.min(1, Math.max(0.15, b.skill + DIFF_SKILL[this.options.difficulty]));
+      // bots shoot looser than their weapon allows, less so the better they are
+      s.spreadMul = 1.9 - b.skill * 0.9;
       this.soldiers.push(s);
       this.bots.push(b);
     }
@@ -285,7 +287,7 @@ export class Game {
       if (s.isPlayer || Math.random() < 0.5) this.renderer.flashAt(m.x, m.y + 0.2, m.z, def.model.bulky ? 9 : 6, 0xffb060, 0.06);
     }
     if (s.isPlayer) this.renderer.shake = Math.min(0.5, this.renderer.shake + st.recoil * (def.model.bulky ? 3 : 2));
-    const spread = s.spread();
+    const spread = s.spread() * s.spreadMul;
     s.pelletsFired += st.pellets;
     for (let i = 0; i < st.pellets; i++) {
       tmpD.copy(s.aimDir);
