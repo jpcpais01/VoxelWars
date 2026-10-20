@@ -46,9 +46,15 @@ export const M = {
   GLOW_RED: 40,
   CANVAS: 41,
   BOAT: 42,
+  HAZARD: 43,
+  FERN: 44,
+  RUST: 45,
+  MORTAR: 46,
+  MOSS: 47,
+  LAMP: 48,
 } as const;
 
-export const MAT_COUNT = 43;
+export const MAT_COUNT = 49;
 
 export interface MatDef {
   name: string;
@@ -114,5 +120,11 @@ MATS[M.GLOW_BLUE] = D('blue light', 0x6fd2ff, 6, 0.0, 0.2, 'glow');
 MATS[M.GLOW_RED] = D('red light', 0xff8a5c, 6, 0.0, 0.2, 'glow');
 MATS[M.CANVAS] = D('canvas', 0x6f7448, 2, 0.06, 0.3, 'soft');
 MATS[M.BOAT] = D('boat paint', 0x2f8f8a, 4, 0.05, 0.5, 'wood');
+MATS[M.HAZARD] = D('hazard paint', 0xd9a521, 10, 0.04, 0.4, 'build');
+MATS[M.FERN] = D('ferns', 0x4c8a34, 1, 0.18, 0.12, 'leaf');
+MATS[M.RUST] = D('rusted steel', 0x7a4630, 16, 0.14, 0.55, 'metal');
+MATS[M.MORTAR] = D('mortar', 0xa49e90, 8, 0.06, 0.25, 'stone');
+MATS[M.MOSS] = D('moss', 0x5b7a34, 2, 0.14, 0.12, 'soft');
+MATS[M.LAMP] = D('lamp', 0xffc46b, 4, 0.0, 0.2, 'glow');
 
 export const isLeaf = (m: number) => MATS[m]?.kind === 'leaf';

@@ -1,5 +1,8 @@
 import * as THREE from 'three';
-import { CORE_HP, MAP_D, MAP_W, TEAM_BLUE, VOXEL, WATER_Y, WX, WZ } from '../core/config';
+import { CORE_HP, MAP_D, MAP_W, TEAM_BLUE, VOXEL, WATER_Y, WX, WY, WZ } from '../core/config';
+
+/** minimap texel = 0.8 m */
+const MAP_STEP = Math.round(0.8 / VOXEL);
 import type { FeedEntry, Game } from '../game/Game';
 import { Soldier } from '../game/Soldier';
 import { ITEMS } from '../game/weapons';
@@ -36,8 +39,8 @@ export class HUD {
   private nums: { x: number; y: number; z: number; v: number; t: number; head: boolean; kill: boolean; jx: number }[] = [];
 
   constructor(private game: Game) {
-    this.mapImg.width = WX / 2;
-    this.mapImg.height = WZ / 2;
+    this.mapImg.width = WX / MAP_STEP;
+    this.mapImg.height = WZ / MAP_STEP;
     this.resize();
     window.addEventListener('resize', () => this.resize());
   }
@@ -407,11 +410,11 @@ export class HUD {
     const col = new THREE.Color();
     for (let mx = 0; mx < this.mapImg.width; mx++)
       for (let mz = 0; mz < this.mapImg.height; mz++) {
-        const x = mx * 2, z = mz * 2;
+        const x = mx * MAP_STEP, z = mz * MAP_STEP;
         const k = x * WZ + z;
         const top = w.top[k];
         const fl = w.floor[k];
-        const m = w.vox[k * 64 + Math.max(0, top - 1)];
+        const m = w.vox[k * WY + Math.max(0, top - 1)];
         let r, g, b;
         if (fl * VOXEL < WATER_Y && top * VOXEL < WATER_Y + 0.5) {
           const depth = WATER_Y - fl * VOXEL;
@@ -420,7 +423,7 @@ export class HUD {
           b = 140 - depth * 8;
         } else {
           col.setHex(MATS[m]?.color ?? 0x666666);
-          const shade = 0.7 + Math.min(0.5, top / 60);
+          const shade = 0.7 + Math.min(0.5, (top * VOXEL) / 24);
           r = col.r * 255 * shade;
           g = col.g * 255 * shade;
           b = col.b * 255 * shade;
@@ -428,7 +431,7 @@ export class HUD {
           r = Math.sqrt(r / 255) * 255;
           g = Math.sqrt(g / 255) * 255;
           b = Math.sqrt(b / 255) * 255;
-          if (top - fl > 6) {
+          if ((top - fl) * VOXEL > 2.4) {
             r *= 0.75;
             g *= 0.8;
             b *= 0.75;

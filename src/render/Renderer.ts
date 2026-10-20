@@ -15,6 +15,8 @@ interface QualityDef {
   dof: boolean;
   ssr: boolean;
   grass: boolean;
+  /** world detail distance multiplier */
+  lod: number;
   fxaa: boolean;
   /** re-render the sun's shadow map every N frames (the light matrix stays paired with its map) */
   shadowEvery: number;
@@ -57,10 +59,10 @@ export const LIGHTING: Record<LightingId, LightingDef> = {
 };
 
 export const QUALITY: Record<Quality, QualityDef> = {
-  low: { scale: 0.75, maxDpr: 1, shadow: 1024, bloom: false, dof: false, ssr: false, grass: false, fxaa: true, shadowEvery: 2 },
-  medium: { scale: 1, maxDpr: 1.25, shadow: 1536, bloom: true, dof: false, ssr: false, grass: true, fxaa: true, shadowEvery: 2 },
-  high: { scale: 1, maxDpr: 1.5, shadow: 2048, bloom: true, dof: true, ssr: true, grass: true, fxaa: true, shadowEvery: 1 },
-  ultra: { scale: 1, maxDpr: 2, shadow: 4096, bloom: true, dof: true, ssr: true, grass: true, fxaa: true, shadowEvery: 1 },
+  low: { scale: 0.75, maxDpr: 1, shadow: 1024, bloom: false, dof: false, ssr: false, grass: false, lod: 0.6, fxaa: true, shadowEvery: 2 },
+  medium: { scale: 1, maxDpr: 1.25, shadow: 1536, bloom: true, dof: false, ssr: false, grass: true, lod: 0.8, fxaa: true, shadowEvery: 2 },
+  high: { scale: 1, maxDpr: 1.5, shadow: 2048, bloom: true, dof: true, ssr: true, grass: true, lod: 1, fxaa: true, shadowEvery: 1 },
+  ultra: { scale: 1, maxDpr: 2, shadow: 4096, bloom: true, dof: true, ssr: true, grass: true, lod: 1.4, fxaa: true, shadowEvery: 1 },
 };
 
 export class Renderer {

@@ -53,13 +53,14 @@ vAO = aData.y / 255.0;
 vObjNormal = objectNormal;
 ${body ? 'vVoxPos = position * VOX + uVoxOffset;' : 'vVoxPos = (modelMatrix * vec4(position, 1.0)).xyz;'}
 int kind = int(aData.x + 0.5);
-if (kind >= 12 && kind <= 16 || kind == 30) {
+if (kind >= 12 && kind <= 16 || kind == 30 || kind == 44) {
   vec3 wp = vVoxPos;
   float ph = uTime * 1.6 + wp.x * 0.35 + wp.z * 0.27;
   float sway = sin(ph) * 0.5 + sin(ph * 2.3 + 1.7) * 0.25;
-  // local units are voxels
-  transformed.xz += uWind * sway * (0.055 / VOX);
-  transformed.y += sin(ph * 1.7) * (0.015 / VOX);
+  // local units are voxel cells, which grow with the chunk's LOD
+  float unit = length(modelMatrix[0].xyz);
+  transformed.xz += uWind * sway * (0.055 / unit);
+  transformed.y += sin(ph * 1.7) * (0.015 / unit);
 }`,
       )
       .replace(
@@ -132,8 +133,10 @@ vec2 fuv = abs(on.x) > 0.5 ? fr.yz : (abs(on.y) > 0.5 ? fr.xz : fr.xy);
 vec2 eg = min(fuv, 1.0 - fuv);
 float ed = min(eg.x, eg.y);
 float bev = smoothstep(0.0, 0.11, ed);
-col *= mix(1.0 - prm.x * 0.38, 1.0, bev);
-col *= 1.0 + (1.0 - smoothstep(0.0, 0.05, ed)) * top * prm.x * 0.25;
+// fade the edge lines out once a voxel shrinks to a few pixels, before they shimmer
+float bevK = 1.0 - smoothstep(0.12, 0.4, length(fwidth(vVoxPos)) / VOX);
+col *= mix(1.0 - prm.x * 0.38 * bevK, 1.0, bev);
+col *= 1.0 + (1.0 - smoothstep(0.0, 0.05, ed)) * top * prm.x * 0.25 * bevK;
 diffuseColor.rgb = col;
 `,
       )

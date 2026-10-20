@@ -154,6 +154,8 @@ async function boot() {
   await progress(0.92, 'Baking sky light');
   await chunks.buildSky();
   chunks.setGrass(renderer.q.grass);
+  chunks.lodScale = renderer.q.lod;
+  chunks.setView(renderer.camera.position);
   const water = new Water(world);
   water.setFlow(info.flow);
   renderer.setWater(water);
@@ -316,6 +318,7 @@ function applySettings() {
   if (q !== renderer.quality) {
     renderer.setQuality(q);
     chunks?.setGrass(renderer.q.grass);
+    if (chunks) chunks.lodScale = renderer.q.lod;
   }
   audio.setVolume(settings.volume);
   if (game?.pc) {

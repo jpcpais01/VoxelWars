@@ -28,6 +28,8 @@ export class World {
   readonly floor = new Uint8Array(WX * WZ);
   /** Highest solid voxel + 1 per column. */
   readonly top = new Uint8Array(WX * WZ);
+  /** Natural terrain height per column as generated: voxels below it are held by the ground. */
+  readonly ground = new Uint8Array(WX * WZ);
   readonly dirtyChunks = new Set<number>();
   readonly changedColumns = new Set<number>();
   version = 0;
@@ -190,7 +192,7 @@ export class World {
     let nx = 0, ny = 0, nz = 0;
     let t = 0;
     const vox = this.vox;
-    for (let i = 0; i < 1024; i++) {
+    for (let i = 0; i < 4096; i++) {
       if (y >= WY && dy >= 0) return false;
       if (x >= 0 && z >= 0 && x < WX && z < WZ && y < WY) {
         const m = y < 0 ? M.BEDROCK : vox[(x * WZ + z) * WY + y];

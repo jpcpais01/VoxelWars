@@ -1,5 +1,8 @@
 import * as THREE from 'three';
-import { MAP_D, MAP_W, VOXEL, WATER_Y, WX, WY, WZ } from '../core/config';
+import { FLOW_RES, MAP_D, MAP_W, VOXEL, WATER_Y, WX, WY, WZ } from '../core/config';
+
+// bed heights are stored as voxels * BED_K, 0.025 m steps whatever the voxel size
+const BED_K = Math.round(VOXEL * 40);
 import { World } from '../world/World';
 import { GLSL_COMMON, shared } from './shaderlib';
 
@@ -99,7 +102,7 @@ export class Water {
 
   /** Flow field from the generator: the river current and the lake swirl advect the waves. */
   setFlow(flow: Uint8Array) {
-    const t = new THREE.DataTexture(flow, WZ >> 1, WX >> 1, THREE.RGFormat, THREE.UnsignedByteType);
+    const t = new THREE.DataTexture(flow, FLOW_RES, FLOW_RES, THREE.RGFormat, THREE.UnsignedByteType);
     t.magFilter = THREE.LinearFilter;
     t.minFilter = THREE.LinearFilter;
     t.unpackAlignment = 1;
@@ -108,7 +111,7 @@ export class Water {
   }
 
   refreshAll() {
-    for (let x = 0; x < WX; x++) for (let z = 0; z < WZ; z++) this.bed[x * WZ + z] = this.bedAt(x, z) * 16;
+    for (let x = 0; x < WX; x++) for (let z = 0; z < WZ; z++) this.bed[x * WZ + z] = this.bedAt(x, z) * BED_K;
     this.bedTex.needsUpdate = true;
   }
 
@@ -116,7 +119,7 @@ export class Water {
     let changed = false;
     for (const c of cols) {
       const x = (c / WZ) | 0, z = c % WZ;
-      const v = this.bedAt(x, z) * 16;
+      const v = this.bedAt(x, z) * BED_K;
       if (this.bed[c] !== v) {
         this.bed[c] = v;
         changed = true;
@@ -169,7 +172,7 @@ uniform float uSSR;`,
   vec3 V = normalize(cameraPosition - vWorldP);
   float surfDepth = vViewPosition.z;
   vec2 mapUV = vWorldP.zx / MAP_SIZE.yx;
-  float bedY = texture2D(tBed, vec2(mapUV.x, mapUV.y)).r * 255.0 / 16.0 * VOX;
+  float bedY = texture2D(tBed, vec2(mapUV.x, mapUV.y)).r * 255.0 / ${BED_K.toFixed(1)} * VOX;
   float vdepth = max(${WATER_Y.toFixed(3)} - bedY, 0.0);
 
   // flow-mapped normals: two layers advected along the current, cross-faded so they never smear

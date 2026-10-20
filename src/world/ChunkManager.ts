@@ -2,29 +2,51 @@ import * as THREE from 'three';
 import { CHUNK, CX, CZ, VOXEL, WX, WY, WZ } from '../core/config';
 import { createGrassMaterial, createVoxelMaterial } from '../render/voxelMaterial';
 import { shared } from '../render/shaderlib';
-import { greedyMesh, grassMesh } from './mesher';
-import { computeSky, SKY_D, SKY_H, SKY_W } from './skyLight';
-import type { WorkerIn, WorkerOut } from './meshWorker';
+import { buildChunk, CHUNK_PAD, LOD_LEVELS } from './mesher';
+import { computeSky, SKY_CELL, SKY_D, SKY_H, SKY_W } from './skyLight';
+import type { MeshOut, WorkerIn, WorkerOut } from './meshWorker';
 import { World } from './World';
 
-const PAD = CHUNK + 2;
-const PY = WY + 2;
-const VOL_SIZE = PAD * PAD * PY;
+const PAD = CHUNK_PAD;
+const FX = CHUNK + PAD * 2;
+const VOL_SIZE = FX * FX * WY;
+const CHUNK_M = CHUNK * VOXEL;
+/** camera distance (metres, to the chunk footprint) where each LOD takes over */
+const LOD_START = [0, 22, 64];
+/** grass is only ever drawn this close (the shader fades it out before) */
+const GRASS_R = 54;
+
+interface Chunk {
+  key: number;
+  cx: number;
+  cz: number;
+  /** bumps whenever the chunk's voxels change */
+  ver: number;
+  slots: (THREE.Mesh | null)[];
+  slotVer: number[];
+  shown: number;
+  dist: number;
+  want: number;
+  grass: THREE.Mesh | null;
+  grassVer: number;
+  busy: number;
+  near: boolean;
+}
 
 interface ChunkResult {
   key: number;
-  positions: Uint8Array;
-  data: Uint8Array;
-  indices: Uint16Array | Uint32Array;
-  vertexCount: number;
-  gPos: Float32Array;
-  gCol: Uint8Array;
+  ver: number;
+  meshes: MeshOut[];
+  gPos: Float32Array | null;
+  gCol: Uint8Array | null;
   gCount: number;
 }
 
 /**
- * Owns the chunk meshes. Meshing runs on a small worker pool so destruction never stalls a
- * frame; the main thread only copies the padded volume out and uploads the packed result.
+ * Owns the chunk meshes. Every chunk keeps up to three meshes: full 0.2 m detail near the camera,
+ * 0.4 m blocks in the middle distance and 0.8 m blocks far away, rebuilt on a worker pool from one
+ * copy of the voxels whenever the camera or destruction needs them. Coarse meshes keep short
+ * skirts on their borders so no crack opens between neighbours at different detail.
  * Also owns the baked sky-visibility volume that every world shader samples.
  */
 export class ChunkManager {
@@ -33,15 +55,17 @@ export class ChunkManager {
   readonly material = createVoxelMaterial();
   readonly materialSolid = createVoxelMaterial({ cutout: false });
   readonly grassMaterial = createGrassMaterial();
-  private meshes: (THREE.Mesh | null)[] = [];
-  private grass: (THREE.Mesh | null)[] = [];
+  private chunks: Chunk[] = [];
   grassEnabled = true;
   totalVerts = 0;
+  /** detail distance multiplier (quality setting) */
+  lodScale = 1;
+  private view: THREE.Vector3 | null = null;
 
   private workers: Worker[] = [];
   private nextWorker = 0;
   private jobId = 0;
-  private inFlight = new Map<number, number>(); // chunk key -> job id
+  private inFlight = 0;
   private waiters = new Map<number, { done?: (r: WorkerOut) => void; fallback: () => void }>();
   private maxInFlight = 6;
 
@@ -53,8 +77,23 @@ export class ChunkManager {
 
   constructor(private world: World, private grassDensity: Uint8Array) {
     this.group.name = 'chunks';
-    this.meshes = new Array(CX * CZ).fill(null);
-    this.grass = new Array(CX * CZ).fill(null);
+    for (let cz = 0; cz < CZ; cz++)
+      for (let cx = 0; cx < CX; cx++)
+        this.chunks.push({
+          key: cx + cz * CX,
+          cx,
+          cz,
+          ver: 0,
+          slots: new Array(LOD_LEVELS).fill(null),
+          slotVer: new Array(LOD_LEVELS).fill(-1),
+          shown: -1,
+          dist: 0,
+          want: 1,
+          grass: null,
+          grassVer: -1,
+          busy: 0,
+          near: false,
+        });
     this.skyData.fill(255);
     this.skyTex = new THREE.Data3DTexture(this.skyData, SKY_W, SKY_D, SKY_H);
     this.skyTex.format = THREE.RedFormat;
@@ -80,21 +119,23 @@ export class ChunkManager {
     }
   }
 
+  /** the camera whose distance decides each chunk's detail */
+  setView(v: THREE.Vector3) {
+    this.view = v;
+  }
+
   // --------------------------------------------------------------------------- meshing
   private fill(cx: number, cz: number, vol: Uint8Array) {
     const w = this.world;
-    const x0 = cx * CHUNK - 1;
-    const z0 = cz * CHUNK - 1;
-    for (let lx = 0; lx < PAD; lx++) {
+    const x0 = cx * CHUNK - PAD;
+    const z0 = cz * CHUNK - PAD;
+    for (let lx = 0; lx < FX; lx++) {
       // outside the map we replicate the edge column so borders get no faces and no AO seams
       const wx = Math.min(WX - 1, Math.max(0, x0 + lx));
-      for (let lz = 0; lz < PAD; lz++) {
+      for (let lz = 0; lz < FX; lz++) {
         const wz = Math.min(WZ - 1, Math.max(0, z0 + lz));
-        const dst = (lx * PAD + lz) * PY;
-        vol[dst] = 1; // below bedrock
         const src = (wx * WZ + wz) * WY;
-        vol.set(w.vox.subarray(src, src + WY), dst + 1);
-        vol[dst + PY - 1] = 0;
+        vol.set(w.vox.subarray(src, src + WY), (lx * FX + lz) * WY);
       }
     }
   }
@@ -110,7 +151,11 @@ export class ChunkManager {
     if (!wait) return; // already handled by the fallback
     this.waiters.delete(r.job);
     if (r.type === 'chunk') {
-      if (this.inFlight.get(r.key) === r.job) this.inFlight.delete(r.key);
+      const c = this.chunks[r.key];
+      if (c.busy === r.job) {
+        c.busy = 0;
+        this.inFlight--;
+      }
       this.apply(r);
     } else this.applySky(r.data, r.i0, r.i1, r.j0, r.j1);
     wait.done?.(r);
@@ -121,30 +166,34 @@ export class ChunkManager {
     if (!this.workers.length) return;
     for (const w of this.workers) w.terminate();
     this.workers = [];
-    this.inFlight.clear();
+    for (const c of this.chunks) c.busy = 0;
+    this.inFlight = 0;
     this.skyBusy = false;
     const pending = [...this.waiters.values()];
     this.waiters.clear();
     for (const p of pending) p.fallback();
   }
 
-  /** Queue a chunk for meshing; resolves when its geometry is live. */
-  private request(cx: number, cz: number): Promise<void> {
-    const key = cx + cz * CX;
+  private density = (wx: number, wz: number) => (wx < 0 || wz < 0 || wx >= WX || wz >= WZ ? 0 : this.grassDensity[wx * WZ + wz] / 255);
+
+  /** Queue a build of the given LODs (bitmask); resolves when the geometry is live. */
+  private request(c: Chunk, lods: number, grass: boolean): Promise<void> {
     if (!this.workers.length) {
-      this.buildSync(cx, cz);
+      this.buildSync(c, lods, grass);
       return Promise.resolve();
     }
     const vol = new Uint8Array(VOL_SIZE);
-    this.fill(cx, cz, vol);
+    this.fill(c.cx, c.cz, vol);
     const job = ++this.jobId;
-    this.inFlight.set(key, job);
+    c.busy = job;
+    this.inFlight++;
+    const ver = c.ver;
     return new Promise((res) =>
       this.post(
-        { type: 'chunk', job, key, vol, sx: PAD, sy: PY, sz: PAD, ox: cx * CHUNK, oz: cz * CHUNK },
+        { type: 'chunk', job, key: c.key, ver, vol, sx: FX, sy: WY, sz: FX, pad: PAD, lods, grass, ox: c.cx * CHUNK, oz: c.cz * CHUNK },
         [vol.buffer],
         () => {
-          this.buildSync(cx, cz);
+          this.buildSync(c, lods, grass);
           res();
         },
         () => res(),
@@ -153,80 +202,104 @@ export class ChunkManager {
   }
 
   private scratch = new Uint8Array(VOL_SIZE);
-  private buildSync(cx: number, cz: number) {
-    this.fill(cx, cz, this.scratch);
-    const md = greedyMesh(this.scratch, PAD, PY, PAD);
-    const dens = this.grassDensity;
-    const gd = grassMesh(this.scratch, PAD, PY, PAD, cx * CHUNK, cz * CHUNK, (wx, wz) => (wx < 0 || wz < 0 || wx >= WX || wz >= WZ ? 0 : dens[wx * WZ + wz] / 255));
-    this.apply({ key: cx + cz * CX, ...md, gPos: gd.positions, gCol: gd.colors, gCount: gd.vertexCount });
+  private buildSync(c: Chunk, lods: number, grass: boolean) {
+    this.fill(c.cx, c.cz, this.scratch);
+    const b = buildChunk(this.scratch, FX, WY, FX, PAD, lods, grass, c.cx * CHUNK, c.cz * CHUNK, this.density);
+    this.apply({
+      key: c.key,
+      ver: c.ver,
+      meshes: b.meshes.map((m) => ({ lod: m.lod, ...m.mesh })),
+      gPos: b.grass?.positions ?? null,
+      gCol: b.grass?.colors ?? null,
+      gCount: b.grass?.vertexCount ?? 0,
+    });
   }
 
   private apply(r: ChunkResult) {
-    const key = r.key;
-    const cx = key % CX, cz = (key / CX) | 0;
-    let mesh = this.meshes[key];
-    if (mesh) {
-      this.totalVerts -= mesh.geometry.getAttribute('position')?.count ?? 0;
-      mesh.geometry.dispose();
+    const c = this.chunks[r.key];
+    const ox = c.cx * CHUNK_M, oz = c.cz * CHUNK_M;
+    for (const m of r.meshes) {
+      const lod = m.lod;
+      if (r.ver < c.slotVer[lod]) continue; // an even newer build already landed
+      let mesh = c.slots[lod];
+      if (mesh) mesh.geometry.dispose();
+      const geo = new THREE.BufferGeometry();
+      // 4 bytes position + 4 bytes data per vertex; the mesh transform scales cells to metres
+      geo.setAttribute('position', new THREE.BufferAttribute(m.positions, 4, false));
+      geo.setAttribute('aData', new THREE.BufferAttribute(m.data, 4, false));
+      geo.setIndex(new THREE.BufferAttribute(m.indices, 1));
+      geo.boundingBox = new THREE.Box3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(CHUNK >> lod, WY >> lod, CHUNK >> lod));
+      geo.boundingSphere = geo.boundingBox.getBoundingSphere(new THREE.Sphere());
+      if (!mesh) {
+        mesh = new THREE.Mesh(geo, c.near ? this.material : this.materialSolid);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        mesh.matrixAutoUpdate = false;
+        mesh.position.set(ox, 0, oz);
+        mesh.scale.setScalar(VOXEL * (1 << lod));
+        mesh.updateMatrix();
+        mesh.name = `chunk ${c.cx},${c.cz} lod${lod}`;
+        mesh.visible = false;
+        c.slots[lod] = mesh;
+        this.group.add(mesh);
+      } else mesh.geometry = geo;
+      c.slotVer[lod] = r.ver;
     }
-    const geo = new THREE.BufferGeometry();
-    // 4 bytes position + 4 bytes data per vertex; the mesh transform scales voxels to metres
-    geo.setAttribute('position', new THREE.BufferAttribute(r.positions, 4, false));
-    geo.setAttribute('aData', new THREE.BufferAttribute(r.data, 4, false));
-    geo.setIndex(new THREE.BufferAttribute(r.indices, 1));
-    geo.boundingBox = new THREE.Box3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(CHUNK, WY, CHUNK));
-    geo.boundingSphere = geo.boundingBox.getBoundingSphere(new THREE.Sphere());
-    this.totalVerts += r.vertexCount;
-    if (!mesh) {
-      mesh = new THREE.Mesh(geo, this.materialSolid);
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-      mesh.matrixAutoUpdate = false;
-      mesh.position.set(cx * CHUNK * VOXEL, 0, cz * CHUNK * VOXEL);
-      mesh.scale.setScalar(VOXEL);
-      mesh.updateMatrix();
-      mesh.name = `chunk ${cx},${cz}`;
-      this.meshes[key] = mesh;
-      this.group.add(mesh);
-    } else mesh.geometry = geo;
-    mesh.visible = r.vertexCount > 0;
+    this.pickShown(c);
 
-    let gm = this.grass[key];
-    if (gm) gm.geometry.dispose();
-    if (r.gCount > 0) {
-      const gg = new THREE.BufferGeometry();
-      gg.setAttribute('position', new THREE.BufferAttribute(r.gPos, 3));
-      gg.setAttribute('aCol', new THREE.BufferAttribute(r.gCol, 4, true));
-      gg.boundingBox = new THREE.Box3(new THREE.Vector3(cx * CHUNK * VOXEL, 0, cz * CHUNK * VOXEL), new THREE.Vector3((cx + 1) * CHUNK * VOXEL, WY * VOXEL, (cz + 1) * CHUNK * VOXEL));
-      gg.boundingSphere = gg.boundingBox.getBoundingSphere(new THREE.Sphere());
-      if (!gm) {
-        gm = new THREE.Mesh(gg, this.grassMaterial);
-        gm.receiveShadow = true;
-        gm.castShadow = false;
-        gm.matrixAutoUpdate = false;
-        gm.visible = this.grassEnabled;
-        this.grass[key] = gm;
-        this.group.add(gm);
-      } else gm.geometry = gg;
-    } else if (gm) {
-      this.group.remove(gm);
-      this.grass[key] = null;
+    if (r.gPos && r.ver >= c.grassVer) {
+      let gm = c.grass;
+      if (gm) gm.geometry.dispose();
+      c.grassVer = r.ver;
+      if (r.gCount > 0) {
+        const gg = new THREE.BufferGeometry();
+        gg.setAttribute('position', new THREE.BufferAttribute(r.gPos, 3));
+        gg.setAttribute('aCol', new THREE.BufferAttribute(r.gCol!, 4, true));
+        gg.boundingBox = new THREE.Box3(new THREE.Vector3(ox, 0, oz), new THREE.Vector3(ox + CHUNK_M, WY * VOXEL, oz + CHUNK_M));
+        gg.boundingSphere = gg.boundingBox.getBoundingSphere(new THREE.Sphere());
+        if (!gm) {
+          gm = new THREE.Mesh(gg, this.grassMaterial);
+          gm.receiveShadow = true;
+          gm.castShadow = false;
+          gm.matrixAutoUpdate = false;
+          gm.visible = this.grassEnabled;
+          c.grass = gm;
+          this.group.add(gm);
+        } else gm.geometry = gg;
+      } else if (gm) {
+        this.group.remove(gm);
+        c.grass = null;
+      }
     }
+  }
+
+  /** Show the wanted LOD if it exists, otherwise the closest level that does. */
+  private pickShown(c: Chunk) {
+    let show = -1;
+    if (c.slots[c.want]) show = c.want;
+    else
+      for (let d = 1; d < LOD_LEVELS && show < 0; d++) {
+        if (c.slots[c.want + d]) show = c.want + d;
+        else if (c.slots[c.want - d]) show = c.want - d;
+      }
+    if (show === c.shown) return;
+    if (c.shown >= 0 && c.slots[c.shown]) c.slots[c.shown]!.visible = false;
+    if (show >= 0) c.slots[show]!.visible = true;
+    c.shown = show;
   }
 
   async buildAll(progress: (p: number) => Promise<void>) {
     let done = 0;
-    const total = CX * CZ;
+    const total = this.chunks.length;
     const all: Promise<void>[] = [];
     let tick = Promise.resolve();
-    for (let cz = 0; cz < CZ; cz++)
-      for (let cx = 0; cx < CX; cx++)
-        all.push(
-          this.request(cx, cz).then(() => {
-            done++;
-            if (done % 12 === 0) tick = progress(done / total);
-          }),
-        );
+    for (const c of this.chunks)
+      all.push(
+        this.request(c, 0b110, true).then(() => {
+          done++;
+          if (done % 12 === 0) tick = progress(done / total);
+        }),
+      );
     // on the main-thread fallback each request already finished synchronously
     await Promise.all(all);
     await tick;
@@ -273,7 +346,7 @@ export class ChunkManager {
   markSky(cols: number[]) {
     const R = 11; // coarse radius the horizon search reaches
     for (const c of cols) {
-      const i = (((c / WZ) | 0) >> 1), j = ((c % WZ) >> 1);
+      const i = (((c / WZ) | 0) / SKY_CELL) | 0, j = ((c % WZ) / SKY_CELL) | 0;
       const b = this.skyDirty;
       if (!b) this.skyDirty = [i - R, i + R + 1, j - R, j + R + 1];
       else {
@@ -285,26 +358,80 @@ export class ChunkManager {
     }
   }
 
-  /** Remesh dirty chunks (off-thread) and refresh the sky volume at a gentle cadence. */
+  private cands: { c: Chunk; lods: number; grass: boolean; p: number }[] = [];
+
+  /**
+   * Pick each chunk's detail from the camera distance, remesh what is missing or stale (nearest
+   * first, off-thread) and refresh the sky volume at a gentle cadence.
+   */
   update(dt = 1 / 60) {
     const dirty = this.world.dirtyChunks;
     if (dirty.size) {
+      for (const key of dirty) this.chunks[key].ver++;
+      dirty.clear();
+    }
+    const v = this.view;
+    const k = this.lodScale;
+    let verts = 0;
+    const cands = this.cands;
+    cands.length = 0;
+    for (const c of this.chunks) {
+      let want = 1;
+      if (v) {
+        const x0 = c.cx * CHUNK_M, z0 = c.cz * CHUNK_M;
+        const dx = Math.max(0, x0 - v.x, v.x - x0 - CHUNK_M);
+        const dz = Math.max(0, z0 - v.z, v.z - z0 - CHUNK_M);
+        const d = Math.hypot(dx, dz, Math.max(0, v.y - 20));
+        c.dist = d;
+        // a couple of metres of hysteresis so a chunk on the boundary doesn't flip every step
+        want = 0;
+        for (let l = 1; l < LOD_LEVELS; l++) if (d > LOD_START[l] * k + (c.shown >= 0 ? (c.shown >= l ? -2.5 : 2.5) : 0)) want = l;
+      } else c.dist = 1e9;
+      c.want = want;
+      this.pickShown(c);
+      if (c.shown >= 0) verts += c.slots[c.shown]!.geometry.getAttribute('position').count;
+      // drop full-detail meshes well behind the camera's detail ring
+      if (v && c.slots[0] && c.dist > LOD_START[1] * k + 30) {
+        const m = c.slots[0]!;
+        this.group.remove(m);
+        m.geometry.dispose();
+        c.slots[0] = null;
+        c.slotVer[0] = -1;
+        this.pickShown(c);
+      }
+      if (c.busy) continue;
+      let lods = 0;
+      let p = c.dist;
+      if (c.slotVer[want] !== c.ver) lods |= 1 << want;
+      // build full detail a little before the camera gets there
+      if (v && want > 0 && c.dist < LOD_START[1] * k + 10 && c.slotVer[0] !== c.ver) {
+        lods |= 1;
+        if (!(lods & (1 << want))) p += 40;
+      }
+      const grass = c.dist < GRASS_R && c.grassVer !== c.ver;
+      if (!lods && !grass) continue;
+      if (!lods) lods = 1 << want;
+      // the shown mesh is stale (destruction) or missing: those go first
+      if (c.shown < 0 || c.slotVer[c.shown] !== c.ver) p -= 1000;
+      cands.push({ c, lods, grass, p });
+    }
+    this.totalVerts = verts;
+
+    if (cands.length) {
+      cands.sort((a, b) => a.p - b.p);
       if (!this.workers.length) {
         const t0 = performance.now();
-        for (const key of dirty) {
-          dirty.delete(key);
-          this.buildSync(key % CX, (key / CX) | 0);
+        for (const q of cands) {
+          this.buildSync(q.c, q.lods, q.grass);
           if (performance.now() - t0 > 4) break;
         }
-      } else {
-        for (const key of dirty) {
-          if (this.inFlight.size >= this.maxInFlight) break;
-          if (this.inFlight.has(key)) continue; // newer data goes out once this one lands
-          dirty.delete(key);
-          void this.request(key % CX, (key / CX) | 0);
+      } else
+        for (const q of cands) {
+          if (this.inFlight >= this.maxInFlight) break;
+          void this.request(q.c, q.lods, q.grass);
         }
-      }
     }
+
     this.skyT -= dt;
     if (this.skyDirty && !this.skyBusy && this.skyT <= 0) {
       const [a, b, c, d] = this.skyDirty;
@@ -336,37 +463,40 @@ export class ChunkManager {
    * discard-free shader so the GPU can reject hidden fragments before shading them.
    */
   updateCutout(ax: number, az: number, ar: number, bx: number, bz: number, br: number) {
-    const half = (CHUNK * VOXEL) / 2;
-    for (let k = 0; k < this.meshes.length; k++) {
-      const m = this.meshes[k];
-      if (!m) continue;
-      const mx = (k % CX) * CHUNK * VOXEL + half, mz = ((k / CX) | 0) * CHUNK * VOXEL + half;
+    const half = CHUNK_M / 2;
+    for (const c of this.chunks) {
+      const mx = c.cx * CHUNK_M + half, mz = c.cz * CHUNK_M + half;
       const near = (ar > 0 && Math.max(Math.abs(mx - ax), Math.abs(mz - az)) < half + ar) || (br > 0 && Math.max(Math.abs(mx - bx), Math.abs(mz - bz)) < half + br);
-      m.material = near ? this.material : this.materialSolid;
+      if (near === c.near) continue;
+      c.near = near;
+      for (const m of c.slots) if (m) m.material = near ? this.material : this.materialSolid;
     }
   }
 
   /** Make both shader variants exist before the first frame so neither compiles mid-game. */
   primeMaterials() {
     let flip = false;
-    for (const m of this.meshes) if (m) m.material = (flip = !flip) ? this.material : this.materialSolid;
+    for (const c of this.chunks) {
+      c.near = flip = !flip;
+      for (const m of c.slots) if (m) m.material = c.near ? this.material : this.materialSolid;
+    }
   }
 
   /** grass only exists close to the camera (blades also fade out in the shader before this) */
   cullGrass(x: number, z: number, r = 46) {
-    const half = (CHUNK * VOXEL) / 2;
+    const half = CHUNK_M / 2;
     const lim = (r + half * 1.42) ** 2;
-    for (let k = 0; k < this.grass.length; k++) {
-      const g = this.grass[k];
+    for (const c of this.chunks) {
+      const g = c.grass;
       if (!g) continue;
-      const mx = (k % CX) * CHUNK * VOXEL + half, mz = ((k / CX) | 0) * CHUNK * VOXEL + half;
+      const mx = c.cx * CHUNK_M + half, mz = c.cz * CHUNK_M + half;
       g.visible = this.grassEnabled && (mx - x) ** 2 + (mz - z) ** 2 < lim;
     }
   }
 
   /** baked open-sky visibility (0..1) at a world point */
   skyAt(x: number, y: number, z: number) {
-    const s = 2 * VOXEL;
+    const s = SKY_CELL * VOXEL;
     const i = Math.min(SKY_W - 1, Math.max(0, Math.floor(x / s)));
     const j = Math.min(SKY_D - 1, Math.max(0, Math.floor(z / s)));
     const k = Math.min(SKY_H - 1, Math.max(0, Math.floor(y / s)));
@@ -375,6 +505,6 @@ export class ChunkManager {
 
   setGrass(on: boolean) {
     this.grassEnabled = on;
-    for (const g of this.grass) if (g) g.visible = on;
+    for (const c of this.chunks) if (c.grass) c.grass.visible = on;
   }
 }
