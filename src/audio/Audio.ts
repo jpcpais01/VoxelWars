@@ -107,7 +107,26 @@ interface Chain {
   nodes: AudioNode[];
   /** sources still playing into it */
   refs: number;
+  /** how loud this chain is at the listener (for voice priority) */
+  level: number;
+  dead: boolean;
+  ui: boolean;
 }
+
+interface Voice {
+  src: AudioBufferSourceNode;
+  g: GainNode;
+  pri: number;
+  t0: number;
+  group: object | null;
+  layer: number;
+  ui: boolean;
+  /** already fading out (stolen or choked) */
+  gone: boolean;
+}
+
+/** hard ceiling on one-shot voices; the quietest, oldest one makes way for a louder new one */
+const MAX_VOICES = 44;
 
 interface Later {
   at: number;
@@ -124,6 +143,7 @@ interface Loop {
 
 interface Tracked extends Loop {
   p: { pos: THREE.Vector3; vel: THREE.Vector3; dead: boolean };
+  seen: number;
 }
 
 interface Spinner extends Loop {
@@ -165,6 +185,7 @@ export class Audio {
   private ui!: GainNode;
   private amb!: GainNode;
   private muffle!: BiquadFilterNode;
+  private world!: GainNode;
   private revIn!: GainNode;
   private echoIn!: GainNode;
   listener = new THREE.Vector3();
@@ -176,7 +197,8 @@ export class Audio {
   private occCache = new Map<number, { t: number; v: number }>();
   private recent = new Map<string, number>();
   private queue: Later[] = [];
-  private voices = 0;
+  private active: Voice[] = [];
+  private paused = false;
   private ambLoops: Record<string, Loop> | null = null;
   private spins = new Map<object, Spinner>();
   private tracked: Tracked[] = [];
@@ -220,9 +242,11 @@ export class Audio {
     this.muffle.frequency.value = 22000;
     this.muffle.Q.value = 0.4;
     this.muffle.connect(comp);
+    this.world = ctx.createGain();
+    this.world.connect(this.muffle);
     this.sfx = ctx.createGain();
     this.sfx.gain.value = 0.72;
-    this.sfx.connect(this.muffle);
+    this.sfx.connect(this.world);
     this.amb = ctx.createGain();
     this.amb.gain.value = 0.6;
     this.amb.connect(this.muffle);
@@ -241,7 +265,7 @@ export class Audio {
     conv.buffer = ir;
     const revOut = ctx.createGain();
     revOut.gain.value = 0.55;
-    this.revIn.connect(conv).connect(revOut).connect(this.muffle);
+    this.revIn.connect(conv).connect(revOut).connect(this.world);
 
     // slapback off the valley sides: two dark, panned delay taps with a little feedback
     this.echoIn = ctx.createGain();
@@ -254,9 +278,8 @@ export class Audio {
     this.echoIn.connect(hp).connect(lp);
     const echoOut = ctx.createGain();
     echoOut.gain.value = 0.5;
-    echoOut.connect(this.muffle);
-    echoOut.connect(this.revIn);
-    for (const [time, pan, fb] of [[0.31, -0.65, 0.3], [0.47, 0.6, 0.26]] as const) {
+    echoOut.connect(this.world);
+    for (const [time, pan, fb] of [[0.31, -0.65, 0.18], [0.47, 0.6, 0.14]] as const) {
       const d = ctx.createDelay(1);
       d.delayTime.value = time;
       const f = ctx.createGain();
@@ -271,6 +294,7 @@ export class Audio {
       d.connect(p).connect(echoOut);
     }
 
+    window.setInterval(() => this.maintain(), 250);
     this.bank = new Bank(ctx);
     this.bank.warm(['click', 'hover', 'amb.river', 'amb.wind', 'amb.leaves', 'amb.insects', 'deploy', 'gun.ar', 'gun.ar.far', 'hit', 'head', 'kill']);
   }
@@ -372,45 +396,101 @@ export class Audio {
       last.connect(s).connect(this.echoIn);
       nodes.push(s);
     }
-    return { input, nodes, refs: 0 };
+    return { input, nodes, refs: 0, level: (p ? p.gain : 1) * dry, dead: false, ui: bus === this.ui };
   }
 
-  /** start a bank sound into a chain; the chain is torn down when its last source ends */
-  private play(key: string, ch: Chain, t: number, gain = 1, rate = 1): AudioBufferSourceNode | null {
+  /**
+   * Start a bank sound into a chain; the chain is torn down when its last source ends.
+   * `group` + `layer` form a choke group: a new sound cuts the tail of the previous one in the same
+   * group and layer (one shooter's auto fire keeps one tail instead of stacking dozens).
+   */
+  private play(key: string, ch: Chain, t: number, gain = 1, rate = 1, opt?: { group?: object; layer?: number; pri?: number }): AudioBufferSourceNode | null {
+    if (ch.dead) return null;
     const buf = this.bank.pick(key);
-    if (!buf || gain < 0.002) return null;
+    const pri = (opt?.pri ?? 1) * ch.level * gain;
+    if (!buf || gain < 0.002 || !this.claim(pri)) {
+      if (ch.refs === 0) this.drop(ch);
+      return null;
+    }
     const ctx = this.ctx!;
+    const start = Math.max(t, ctx.currentTime);
+    const group = opt?.group ?? null, layer = opt?.layer ?? 0;
+    if (group) {
+      for (const v of this.active) if (!v.gone && v.group === group && v.layer === layer) this.fade(v, start + (layer === 0 ? 0.02 : 0), layer === 0 ? 0.05 : 0.14);
+    }
     const s = ctx.createBufferSource();
     s.buffer = buf;
     if (rate !== 1) s.playbackRate.value = rate;
-    let out: AudioNode = s;
-    if (gain !== 1) {
-      const g = ctx.createGain();
-      g.gain.value = gain;
-      s.connect(g);
-      out = g;
-    }
-    out.connect(ch.input);
-    this.voices++;
+    const g = ctx.createGain();
+    g.gain.value = gain;
+    s.connect(g).connect(ch.input);
+    const v: Voice = { src: s, g, pri: ch.ui ? pri * 4 : pri, t0: start, group, layer, ui: ch.ui, gone: false };
+    this.active.push(v);
     ch.refs++;
     s.onended = () => {
-      this.voices--;
-      out.disconnect();
-      if (--ch.refs <= 0) for (const n of ch.nodes) n.disconnect();
+      const i = this.active.indexOf(v);
+      if (i >= 0) this.active.splice(i, 1);
+      g.disconnect();
+      if (--ch.refs <= 0) this.drop(ch);
     };
-    s.start(Math.max(t, ctx.currentTime));
+    s.start(start);
     return s;
   }
 
-  /** room for one more voice? quiet ones give way first when the mix is crowded */
+  private drop(ch: Chain) {
+    ch.dead = true;
+    for (const n of ch.nodes) n.disconnect();
+  }
+
+  /** fade a voice out and stop it */
+  private fade(v: Voice, at: number, dur: number) {
+    if (v.gone) return;
+    v.gone = true;
+    const now = this.now();
+    at = Math.max(at, now);
+    try {
+      v.g.gain.cancelScheduledValues(at);
+      v.g.gain.setTargetAtTime(0, at, dur / 4);
+      v.src.stop(at + dur);
+    } catch {
+      /* already stopped */
+    }
+  }
+
+  /** make room for a voice of priority `pri`: steal the weakest live voice if the mix is full */
+  private claim(pri: number) {
+    if (pri < 0.003) return false;
+    let live = 0;
+    let weakest: Voice | null = null, ws = Infinity;
+    const now = this.now();
+    for (const v of this.active) {
+      if (v.gone) continue;
+      live++;
+      // older voices are mostly tail by now
+      const score = v.pri / (1 + Math.max(0, now - v.t0) * 3);
+      if (score < ws) {
+        ws = score;
+        weakest = v;
+      }
+    }
+    if (live < MAX_VOICES) return true;
+    if (!weakest || ws >= pri) return false;
+    this.fade(weakest, now, 0.03);
+    return true;
+  }
+
+  /** room for one more voice? (cheap early-out before building a chain) */
   private room(level: number, important = false) {
-    if (important) return this.voices < 140;
-    if (this.voices > 90) return false;
-    if (this.voices > 56) return level > 0.25;
-    return level > 0.004;
+    return important || level > 0.004;
+  }
+
+  /** number of one-shot voices currently sounding */
+  get voices() {
+    return this.active.length;
   }
 
   private later(delay: number, fn: (t: number) => void, valid?: () => boolean) {
+    if (this.paused) return;
     this.queue.push({ at: this.now() + delay, fn, valid });
   }
 
@@ -420,7 +500,7 @@ export class Audio {
     for (let i = 0; i < this.queue.length; i++) {
       const q = this.queue[i];
       if (q.at <= now + 0.05) {
-        if (!q.valid || q.valid()) q.fn(Math.max(q.at, now));
+        if (q.at > now - 0.25 && (!q.valid || q.valid())) q.fn(Math.max(q.at, now));
       } else this.queue[w++] = q;
     }
     this.queue.length = w;
@@ -461,8 +541,12 @@ export class Audio {
     const t = this.now();
     l.gain.gain.cancelScheduledValues(t);
     l.gain.gain.setTargetAtTime(0, t, fade / 3);
-    l.src.stop(t + fade * 2);
     l.src.onended = () => l.gain.disconnect();
+    try {
+      l.src.stop(t + fade * 2);
+    } catch {
+      /* already stopped */
+    }
   }
 
   private aim(l: Loop, P: Place | null, gain: number, tc = 0.04) {
@@ -510,8 +594,9 @@ export class Audio {
     // close layer fades into the distant boom as the shooter gets further away
     const near = o.isPlayer ? 1 : 1 / (1 + (dist / 32) ** 2);
     const far = sup ? 0 : o.isPlayer ? 0.3 : 0.18 + 0.8 * smooth(3, 40, dist);
-    this.play(sup ? `gun.${gid}.sup` : `gun.${gid}`, ch, t0, sup ? 0.6 : near, rate);
-    if (far > 0.01) this.play(`gun.${gid}.far`, ch, t0 + 0.004, far, rate);
+    const pri = o.isPlayer ? 3 : 1;
+    this.play(sup ? `gun.${gid}.sup` : `gun.${gid}`, ch, t0, sup ? 0.6 : near, rate, { group: o.owner, layer: 0, pri });
+    if (far > 0.01) this.play(`gun.${gid}.far`, ch, t0 + 0.004, far, rate, { group: o.owner, layer: 1, pri });
 
     // the shooter's own mechanics
     const self = o.isPlayer ? null : o.owner;
@@ -578,7 +663,7 @@ export class Audio {
 
   /** rotary cannon motor: call every frame while the gun is held; it fades out by itself */
   spin(key: object, pos: THREE.Vector3, spin: number, isPlayer: boolean) {
-    if (!this.ctx) return;
+    if (!this.ctx || this.paused) return;
     let v = this.spins.get(key);
     const P = isPlayer ? null : this.place(pos, 7, 2, true, 40);
     if (!v) {
@@ -588,16 +673,16 @@ export class Audio {
       v = { ...l, seen: 0 };
       this.spins.set(key, v);
     }
-    v.seen = this.now();
-    v.src.playbackRate.setTargetAtTime(0.28 + 0.72 * spin, v.seen, 0.03);
+    v.seen = performance.now();
+    v.src.playbackRate.setTargetAtTime(0.28 + 0.72 * spin, this.now(), 0.03);
     this.aim(v, P, Math.pow(spin, 0.8) * (isPlayer ? 0.32 : 0.45));
   }
 
   /** follow a rocket in flight: motor roar with doppler */
   rocket(p: { pos: THREE.Vector3; vel: THREE.Vector3; dead: boolean }) {
-    if (!this.ctx || !this.bank.ready('rocketLoop')) return;
+    if (!this.ctx || this.paused || !this.bank.ready('rocketLoop') || this.tracked.length >= 6) return;
     const l = this.makeLoop('rocketLoop', this.sfx, 0.12);
-    if (l) this.tracked.push({ ...l, p });
+    if (l) this.tracked.push({ ...l, p, seen: performance.now() });
   }
 
   /** a bullet passing close to the listener */
@@ -810,10 +895,8 @@ export class Audio {
 
     // moving loops
     for (const r of this.tracked) {
-      if (r.p.dead) {
-        this.stopLoop(r);
-        continue;
-      }
+      if (r.p.dead) continue;
+      r.seen = performance.now();
       const P = this.place(r.p.pos, 9, 1, true, 60);
       // doppler from the closing speed
       const L = this.listener;
@@ -821,13 +904,7 @@ export class Audio {
       r.src.playbackRate.setTargetAtTime(clamp(SPEED_OF_SOUND / (SPEED_OF_SOUND - vr), 0.6, 1.6), t, 0.03);
       this.aim(r, P, 0.55, 0.03);
     }
-    this.tracked = this.tracked.filter((r) => !r.p.dead);
-    for (const [k, v] of this.spins) {
-      if (t - v.seen > 0.2) {
-        this.stopLoop(v, 0.15);
-        this.spins.delete(k);
-      }
-    }
+    this.maintain();
 
     // ambience beds
     if (!this.ambLoops && this.bank.ready('amb.river') && this.bank.ready('amb.wind') && this.bank.ready('amb.leaves') && this.bank.ready('amb.insects')) {
@@ -876,6 +953,54 @@ export class Audio {
         this.play('heart', this.chain(null, 0, 0, this.ui), t, 0.18 + 0.4 * (1 - this.hp / 35));
       }
     } else this.heartT = 0;
+  }
+
+  /**
+   * Stop moving loops whose owner went away or stopped reporting (dead rocket, minigun put away,
+   * game loop paused). Runs every frame and on its own timer, so nothing can hum on forever.
+   */
+  private maintain() {
+    const now = performance.now();
+    this.tracked = this.tracked.filter((r) => {
+      if (!r.p.dead && now - r.seen < 300) return true;
+      this.stopLoop(r);
+      return false;
+    });
+    for (const [k, v] of this.spins) {
+      if (now - v.seen > 250) {
+        this.stopLoop(v, 0.15);
+        this.spins.delete(k);
+      }
+    }
+  }
+
+  /** silence everything in the world at once (pause, match over); UI and ambience keep going */
+  stopWorld() {
+    if (!this.ctx) return;
+    this.queue.length = 0;
+    for (const v of this.active) if (!v.ui) this.fade(v, this.now(), 0.08);
+    for (const r of this.tracked) this.stopLoop(r);
+    this.tracked = [];
+    for (const v of this.spins.values()) this.stopLoop(v);
+    this.spins.clear();
+    this.hp = 100;
+  }
+
+  /** the pause menu: world sound fades out (tails, reverb and echo included), the forest stays faintly */
+  setPaused(p: boolean) {
+    this.paused = p;
+    if (!this.ctx) return;
+    const t = this.now();
+    if (p) this.stopWorld();
+    this.world.gain.setTargetAtTime(p ? 0 : 1, t, p ? 0.04 : 0.12);
+    this.amb.gain.setTargetAtTime(p ? 0.25 : 0.6, t, 0.25);
+  }
+
+  /** tab hidden: stop the audio clock entirely */
+  setHidden(h: boolean) {
+    if (!this.ctx) return;
+    if (h) void this.ctx.suspend();
+    else void this.ctx.resume();
   }
 
   /** a sound somewhere out in the forest around the listener */
