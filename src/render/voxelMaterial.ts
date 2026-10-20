@@ -1,0 +1,208 @@
+import * as THREE from 'three';
+import { MAT_COUNT } from '../world/materials';
+import { GLSL_CLOUDS, GLSL_COMMON, GLSL_CUTOUT, shared } from './shaderlib';
+
+/**
+ * Voxel surface material: Lambert lighting (sun + hemisphere + shadows) extended with
+ * palette lookup, per-voxel colour jitter, bevelled edges, baked AO, cloud shadows,
+ * underwater caustics, wind sway on foliage and a dithered x-ray cutout around the player.
+ */
+export function createVoxelMaterial(opts: { cutout?: boolean; offset?: THREE.Vector3 } = {}) {
+  const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+  const offset = { value: opts.offset ?? new THREE.Vector3() };
+  const cut = opts.cutout !== false;
+  mat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, shared, { uVoxOffset: offset });
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+${GLSL_COMMON}
+attribute vec4 aData;
+uniform float uTime;
+uniform vec2 uWind;
+uniform vec3 uVoxOffset;
+varying vec3 vVoxPos;
+varying vec3 vObjNormal;
+varying vec3 vWorldP;
+varying vec3 vWorldN;
+varying float vAO;
+flat varying float vMat;`,
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+vMat = aData.x;
+vAO = aData.y / 255.0;
+vObjNormal = normal;
+vVoxPos = position + uVoxOffset;
+int kind = int(aData.x + 0.5);
+if (kind >= 12 && kind <= 16 || kind == 30) {
+  vec3 wp = vVoxPos;
+  float ph = uTime * 1.6 + wp.x * 0.35 + wp.z * 0.27;
+  float sway = sin(ph) * 0.5 + sin(ph * 2.3 + 1.7) * 0.25;
+  transformed.xz += uWind * sway * 0.055;
+  transformed.y += sin(ph * 1.7) * 0.015;
+}`,
+      )
+      .replace(
+        '#include <worldpos_vertex>',
+        `#include <worldpos_vertex>
+vec4 wpv = modelMatrix * vec4(transformed, 1.0);
+vWorldP = wpv.xyz;
+vWorldN = normalize(mat3(modelMatrix) * normal);`,
+      );
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+${GLSL_COMMON}
+${GLSL_CLOUDS}
+${cut ? GLSL_CUTOUT : ''}
+uniform float uTime;
+uniform float uWaterY;
+uniform vec4 uPalette[${MAT_COUNT}];
+uniform vec4 uMatParams[${MAT_COUNT}];
+varying vec3 vVoxPos;
+varying vec3 vObjNormal;
+varying vec3 vWorldP;
+varying vec3 vWorldN;
+varying float vAO;
+flat varying float vMat;`,
+      )
+      .replace(
+        '#include <clipping_planes_fragment>',
+        `#include <clipping_planes_fragment>
+${cut ? 'applyCutout(vViewPosition.z, vWorldP.y);' : ''}`,
+      )
+      .replace(
+        '#include <color_fragment>',
+        `
+int mi = int(vMat + 0.5);
+vec4 pal = uPalette[mi];
+vec4 prm = uMatParams[mi];
+int kind = int(prm.y + 0.5);
+vec3 on = normalize(vObjNormal);
+vec3 cellf = vVoxPos / VOX - on * 0.5;
+vec3 cell = floor(cellf);
+float h = hash13(cell);
+vec3 col = pal.rgb * (1.0 + (h - 0.5) * 2.0 * pal.w);
+vec3 fr = fract(vVoxPos / VOX);
+float top = step(0.5, on.y);
+// broad colour fields keep big surfaces from looking flat
+float broad = fbm2(vWorldP.xz * 0.045);
+if (mi == 3 || mi == 37) {
+  vec3 dry = vec3(0.55, 0.52, 0.16);
+  vec3 lush = vec3(0.12, 0.30, 0.06);
+  col = mix(col, mix(lush, dry, broad), 0.35 * top);
+  if (top < 0.5 && on.y > -0.5) {
+    // grass side: soil with a green fringe
+    float fringe = step(0.72 - h * 0.18, fr.y);
+    col = mix(uPalette[2].rgb * (0.9 + h * 0.2), col, fringe);
+  }
+} else if (kind == 3) {
+  col *= 0.86 + broad * 0.32;
+  col = mix(col, col * vec3(1.15, 1.12, 0.75), top * 0.35);
+} else if (kind == 1) {
+  if (top > 0.5) col = mix(col, vec3(0.16, 0.26, 0.07), smoothstep(0.35, 0.7, fbm2(vVoxPos.xz * 0.6 + cell.y)) * 0.75);
+} else if (mi == 31) {
+  col *= 0.9 + broad * 0.2;
+}
+// bevelled voxel edges
+vec2 fuv = abs(on.x) > 0.5 ? fr.yz : (abs(on.y) > 0.5 ? fr.xz : fr.xy);
+vec2 eg = min(fuv, 1.0 - fuv);
+float ed = min(eg.x, eg.y);
+float bev = smoothstep(0.0, 0.11, ed);
+col *= mix(1.0 - prm.x * 0.38, 1.0, bev);
+col *= 1.0 + (1.0 - smoothstep(0.0, 0.05, ed)) * top * prm.x * 0.25;
+diffuseColor.rgb = col;
+`,
+      )
+      .replace(
+        '#include <aomap_fragment>',
+        `
+float ao = vAO;
+ao = 0.32 + 0.68 * ao;
+reflectedLight.indirectDiffuse *= ao;
+reflectedLight.directDiffuse *= mix(1.0, ao, 0.3);
+reflectedLight.directDiffuse *= cloudShadow(vWorldP.xz, uTime);
+if (vWorldP.y < uWaterY) {
+  float depth = uWaterY - vWorldP.y;
+  float c = caustics(vWorldP.xz, uTime);
+  float fade = exp(-depth * 0.7);
+  reflectedLight.directDiffuse *= 0.55 + c * 2.2 * fade;
+  reflectedLight.indirectDiffuse *= mix(vec3(0.6, 0.85, 0.85), vec3(1.0), fade);
+}
+if (kind == 7) totalEmissiveRadiance += diffuseColor.rgb * 3.0;
+`,
+      );
+  };
+  mat.customProgramCacheKey = () => (cut ? 'voxel-cut' : 'voxel');
+  return mat;
+}
+
+/** Grass tufts: vertex coloured blades with wind, lit like the ground beneath. */
+export function createGrassMaterial() {
+  const mat = new THREE.MeshLambertMaterial({ color: 0xffffff, side: THREE.DoubleSide });
+  mat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, shared);
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+attribute vec4 aCol;
+uniform float uTime;
+uniform vec2 uWind;
+varying vec3 vGCol;
+varying float vGW;
+varying vec3 vWorldP;`,
+      )
+      .replace(
+        '#include <beginnormal_vertex>',
+        `vec3 objectNormal = vec3(0.0, 1.0, 0.0);
+#ifdef USE_TANGENT
+vec3 objectTangent = vec3(1.0, 0.0, 0.0);
+#endif`,
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `vec3 transformed = vec3(position);
+float w = aCol.a;
+float ph = uTime * 2.2 + position.x * 0.9 + position.z * 0.7;
+float g = sin(ph) * 0.6 + sin(ph * 2.7 + 0.5) * 0.3 + sin(uTime * 0.6 + position.x * 0.08) * 0.6;
+transformed.xz += uWind * g * 0.09 * w;
+transformed.y -= abs(g) * 0.02 * w;
+vGCol = pow(aCol.rgb, vec3(2.2));
+vGW = w;`,
+      )
+      .replace(
+        '#include <worldpos_vertex>',
+        `#include <worldpos_vertex>
+vWorldP = (modelMatrix * vec4(transformed, 1.0)).xyz;`,
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+${GLSL_COMMON}
+${GLSL_CLOUDS}
+uniform float uTime;
+varying vec3 vGCol;
+varying float vGW;
+varying vec3 vWorldP;`,
+      )
+      .replace('#include <color_fragment>', `diffuseColor.rgb = vGCol;`)
+      .replace(
+        '#include <aomap_fragment>',
+        `
+float ao = mix(0.45, 1.0, vGW);
+reflectedLight.indirectDiffuse *= ao;
+reflectedLight.directDiffuse *= mix(0.7, 1.0, vGW) * cloudShadow(vWorldP.xz, uTime);
+totalEmissiveRadiance += vGCol * 0.12 * vGW;
+`,
+      );
+  };
+  mat.customProgramCacheKey = () => 'grass';
+  return mat;
+}

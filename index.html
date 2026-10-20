@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#0e1a14" />
+    <meta name="description" content="VoxelWars: destructible voxel warfare. 5v5 across a forest river valley. Blow up the enemy core." />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+    <title>VoxelWars</title>
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+    <canvas id="overlay"></canvas>
+
+    <div id="hud" class="hidden">
+      <canvas id="minimap"></canvas>
+      <div id="topbar">
+        <div class="team blue"><span class="alive" id="alive-blue">5</span><div class="core" id="core-blue"><div class="fill"></div><span class="num">100%</span></div></div>
+        <div id="timer">15:00</div>
+        <div class="team red"><div class="core" id="core-red"><div class="fill"></div><span class="num">100%</span></div><span class="alive" id="alive-red">5</span></div>
+      </div>
+      <div id="feed"></div>
+      <div id="messages"></div>
+      <div id="vitals">
+        <div class="hp"><div id="hp-fill"></div><span id="hp-num">100</span></div>
+        <div id="item"></div>
+      </div>
+      <div id="weapons">
+        <div id="wpn-alt"></div>
+        <div class="wrow"><div><div id="wpn-name"></div><div id="wpn-cat"></div></div><div class="ammo"><span id="ammo">30</span><span id="reserve">/ 120</span></div></div>
+        <div id="reload-bar"><i></i></div>
+        <div id="spin"><i></i></div>
+      </div>
+      <div id="crosshair"><div id="cross-ring"></div><div class="dot"></div></div>
+      <div id="hitmarker"><i></i><i></i><i></i><i></i></div>
+      <div id="dmgdirs"></div>
+      <div id="respawn">
+        <div class="r-title">ELIMINATED</div>
+        <div id="respawn-by"></div>
+        <div class="r-count">Redeploying in <b id="respawn-time">6.0</b></div>
+        <button class="btn ghost" id="respawn-loadout">Change loadout</button>
+      </div>
+      <div id="scoreboard"></div>
+      <div id="touch-ui">
+        <button data-touch="fire" class="tb fire">FIRE</button>
+        <button data-touch="ads" class="tb ads">AIM</button>
+        <button data-tap="reload" class="tb reload">R</button>
+        <button data-tap="swap" class="tb swap">⇄</button>
+        <button data-touch="item" class="tb item">G</button>
+        <button data-tap="jump" class="tb jump">▲</button>
+        <button data-tap="pause" class="tb pause">❚❚</button>
+      </div>
+      <div id="fps"></div>
+    </div>
+
+    <div id="loading" class="screen">
+      <div class="logo"><span class="v">VOXEL</span><span class="w">WARS</span></div>
+      <div class="bar"><i id="load-fill"></i></div>
+      <div id="load-label">Preparing</div>
+    </div>
+
+    <div id="menu" class="screen hidden">
+      <div class="menu-left">
+        <div class="logo"><span class="v">VOXEL</span><span class="w">WARS</span></div>
+        <div class="tagline">Pinewater Valley · 5v5 · Destroy the enemy core</div>
+        <div class="menu-buttons">
+          <button class="btn primary" id="btn-deploy">Deploy</button>
+          <button class="btn" id="btn-loadout">Loadout</button>
+          <button class="btn" id="btn-settings">Settings</button>
+          <button class="btn" id="btn-patch">Patch notes</button>
+          <button class="btn" id="btn-help">How to play</button>
+        </div>
+        <div class="menu-kit" id="menu-kit"></div>
+      </div>
+      <div class="menu-foot">v0.1 · Built for speed: dynamic resolution keeps it smooth on phones and laptops</div>
+    </div>
+
+    <div id="loadout" class="panel-screen">
+      <div class="lo-panel">
+        <header><h1>Loadout</h1><span>Any two weapons, any attachments, one piece of equipment.</span><button class="btn primary" id="lo-done">Done</button></header>
+        <div class="lo-preview"><canvas id="preview"></canvas><div class="wtitle" id="lo-wtitle"></div></div>
+        <div class="lo-body"></div>
+      </div>
+    </div>
+
+    <div id="settings" class="panel-screen">
+      <div class="panel">
+        <header><h1>Settings</h1><button class="btn primary" data-close>Done</button></header>
+        <div class="setting"><label>Graphics quality</label><div class="seg" id="set-quality"><button data-q="auto">Auto</button><button data-q="low">Low</button><button data-q="medium">Medium</button><button data-q="high">High</button><button data-q="ultra">Ultra</button></div></div>
+        <div class="setting"><label>Volume</label><input type="range" id="set-volume" min="0" max="1" step="0.05" /></div>
+        <div class="setting"><label>Camera distance</label><input type="range" id="set-zoom" min="0.7" max="1.4" step="0.05" /></div>
+        <div class="setting"><label>Show FPS</label><input type="checkbox" id="set-fps" /></div>
+        <p class="hint">Dynamic resolution is always on: the game lowers its internal resolution briefly when the frame rate dips.</p>
+      </div>
+    </div>
+
+    <div id="patch" class="panel-screen">
+      <div class="panel wide">
+        <header><h1>Patch notes</h1><button class="btn primary" data-close>Close</button></header>
+        <div id="patch-body"></div>
+      </div>
+    </div>
+
+    <div id="help" class="panel-screen">
+      <div class="panel wide">
+        <header><h1>How to play</h1><button class="btn primary" data-close>Got it</button></header>
+        <div class="help-grid">
+          <div><h3>Objective</h3><p>Each team has an energy core inside its HQ bunker. Push across the river, breach the bunker and destroy the enemy core while holding off attacks on yours. Explosives hit cores much harder than bullets.</p></div>
+          <div><h3>Keyboard &amp; mouse</h3><p><kbd>WASD</kbd> move · <kbd>Mouse</kbd> aim · <kbd>LMB</kbd> fire · <kbd>RMB</kbd> aim down sights (looks further ahead) · <kbd>Shift</kbd> sprint · <kbd>Space</kbd> jump · <kbd>R</kbd> reload · <kbd>1</kbd>/<kbd>2</kbd>/<kbd>Q</kbd>/wheel swap · <kbd>G</kbd> equipment · <kbd>Tab</kbd> scores · <kbd>Esc</kbd> pause · <kbd>+</kbd>/<kbd>-</kbd> zoom</p></div>
+          <div><h3>Touch</h3><p>Left thumb moves. Right thumb aims; push it past the ring to fire. Aim assist gently locks onto enemies you can see. Buttons handle aiming, reload, swap, equipment and jump.</p></div>
+          <div><h3>Destruction</h3><p>Nearly everything breaks. Cut a trunk and the tree falls (on whoever is under it). Knock out the base of a wall and the roof comes down. Red fuel barrels chain-react. Craters near the river flood.</p></div>
+          <div><h3>Tips</h3><p>Canopies hide you from above, and bushes block sight lines. Suppressors keep you off the enemy minimap. Rockets and demo charges open new paths into bunkers. Refill ammo at your base's supply depot.</p></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="pause" class="panel-screen">
+      <div class="panel">
+        <header><h1>Paused</h1></header>
+        <div class="menu-buttons">
+          <button class="btn primary" id="p-resume">Resume</button>
+          <button class="btn" id="p-loadout">Loadout (applies on respawn)</button>
+          <button class="btn" id="p-settings">Settings</button>
+          <button class="btn ghost" id="p-quit">Quit to menu</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="end" class="panel-screen">
+      <div class="panel wide">
+        <div id="end-banner"></div>
+        <div id="end-stats"></div>
+        <div class="menu-buttons row">
+          <button class="btn primary" id="e-again">Play again</button>
+          <button class="btn" id="e-loadout">Loadout</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
