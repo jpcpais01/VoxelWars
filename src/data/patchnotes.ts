@@ -7,6 +7,14 @@ export interface PatchGroup {
 
 export const PATCH_NOTES: PatchGroup[] = [
   {
+    hour: '2026-10-20 · 21:00 UTC',
+    title: 'Things Fall Down',
+    entries: [
+      'Real structural collapse. Buildings, towers, rocks and trees no longer need to be cut loose completely to fall: every piece now has to carry its own weight on whatever is left under it. Blow out most of a tower\'s base and the whole top comes down; take out one side and it leans over and topples that way; notch a trunk and the tree falls toward the notch; shoot away the posts under a balcony, a bridge deck or a branch and it snaps off at the root. Stone is strong under weight but cracks when pulled, wood bends and holds, and heavier pieces need more left under them.',
+      'Falling pieces move like one solid chunk: they pivot over the last edge holding them, tear free, tumble, smash through foliage and smash into whatever they land on, then burst into big chunks and rubble that roll on and settle into a heap. All the checking happens in the background near the damage, so it costs nothing while you fight. Also fixed a few trees that grew on top of other trees\' crowns, boulders and fallen logs that hovered over slopes, and gappy branches that held their leaves by a corner.',
+    ],
+  },
+  {
     hour: '2026-10-20 · 20:00 UTC',
     title: 'Bigger Blasts, Better Sound, Finer Guns',
     entries: [
