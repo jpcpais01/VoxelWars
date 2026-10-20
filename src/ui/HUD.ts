@@ -1,0 +1,422 @@
+import * as THREE from 'three';
+import { CORE_HP, MAP_D, MAP_W, TEAM_BLUE, VOXEL, WATER_Y, WX, WZ } from '../core/config';
+import type { FeedEntry, Game } from '../game/Game';
+import { Soldier } from '../game/Soldier';
+import { ITEMS } from '../game/weapons';
+import { MATS } from '../world/materials';
+
+const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
+
+export class HUD {
+  private overlay = $<HTMLCanvasElement>('overlay');
+  private ctx = this.overlay.getContext('2d')!;
+  private mini = $<HTMLCanvasElement>('minimap');
+  private mctx = this.mini.getContext('2d')!;
+  private mapImg = document.createElement('canvas');
+  private mapT = 0;
+  private feedEl = $('feed');
+  private msgEl = $('messages');
+  private cross = $('crosshair');
+  private crossRing = $('cross-ring');
+  private hitEl = $('hitmarker');
+  private dmgEl = $('dmgdirs');
+  private respawnEl = $('respawn');
+  private scoreEl = $('scoreboard');
+  private fpsEl = $('fps');
+  private v = new THREE.Vector3();
+  private fpsAcc = 0;
+  private fpsN = 0;
+  showFps = false;
+  private lastHp = 100;
+
+  constructor(private game: Game) {
+    this.mapImg.width = WX / 2;
+    this.mapImg.height = WZ / 2;
+    this.resize();
+    window.addEventListener('resize', () => this.resize());
+  }
+
+  resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    this.overlay.width = window.innerWidth * dpr;
+    this.overlay.height = window.innerHeight * dpr;
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const ms = this.mini.clientWidth || 170;
+    this.mini.width = ms * dpr;
+    this.mini.height = ms * dpr;
+    this.mctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  // ------------------------------------------------------------------------------ events
+  kill(e: FeedEntry) {
+    const row = document.createElement('div');
+    row.className = 'feed-row';
+    const cls = (t: number) => (t === TEAM_BLUE ? 'blue' : 'red');
+    const p = this.game.player;
+    if (e.killer === p.name || e.victim === p.name) row.classList.add('me');
+    row.innerHTML = `<span class="${cls(e.killerTeam)}">${esc(e.killer)}</span><span class="wpn">${esc(e.weapon || '✖')}${e.special ? ' ◎' : ''}</span><span class="${cls(e.victimTeam)}">${esc(e.victim)}</span>`;
+    this.feedEl.prepend(row);
+    while (this.feedEl.children.length > 6) this.feedEl.lastElementChild?.remove();
+    setTimeout(() => row.classList.add('fade'), 6000);
+    setTimeout(() => row.remove(), 7000);
+    if (e.killer === p.name && e.victim !== p.name) this.message(e.special === 'headshot' ? `Headshot · ${e.victim}` : `Eliminated ${e.victim}`, 'good');
+  }
+
+  hitmarker(kill: boolean, head: boolean) {
+    this.hitEl.className = kill ? 'show kill' : head ? 'show head' : 'show';
+    void this.hitEl.offsetWidth;
+    this.game.audio.hitmarker(kill);
+    clearTimeout((this.hitEl as unknown as { _t: number })._t);
+    (this.hitEl as unknown as { _t: number })._t = window.setTimeout(() => (this.hitEl.className = ''), kill ? 380 : 160);
+  }
+
+  hurt(dir: THREE.Vector3, amount: number) {
+    const el = document.createElement('div');
+    el.className = 'dmg';
+    // dir points from attacker to us; indicator shows where it came from
+    const ang = Math.atan2(-dir.x, dir.z);
+    el.style.transform = `rotate(${ang}rad)`;
+    el.style.opacity = String(Math.min(1, 0.4 + amount / 40));
+    this.dmgEl.appendChild(el);
+    setTimeout(() => el.remove(), 900);
+  }
+
+  message(text: string, kind: 'info' | 'warn' | 'good') {
+    const el = document.createElement('div');
+    el.className = `msg ${kind}`;
+    el.textContent = text;
+    this.msgEl.appendChild(el);
+    while (this.msgEl.children.length > 3) this.msgEl.firstElementChild?.remove();
+    setTimeout(() => el.classList.add('fade'), 2600);
+    setTimeout(() => el.remove(), 3300);
+  }
+
+  // ------------------------------------------------------------------------------ frame
+  update(dt: number, mouseX: number, mouseY: number, touch: boolean) {
+    const g = this.game;
+    const p = g.player;
+    this.fpsAcc += dt;
+    this.fpsN++;
+    if (this.fpsAcc > 0.5) {
+      this.fpsEl.textContent = this.showFps ? `${Math.round(this.fpsN / this.fpsAcc)} fps · ${Math.round(g.renderer.dynScale * 100)}%` : '';
+      this.fpsAcc = 0;
+      this.fpsN = 0;
+    }
+    // cores + timer
+    for (const [i, id] of [[0, 'core-blue'], [1, 'core-red']] as const) {
+      const c = g.cores[i];
+      const fill = $(id).querySelector('.fill') as HTMLElement;
+      fill.style.width = `${(c.hp / CORE_HP) * 100}%`;
+      $(id).classList.toggle('hit', g.time - c.lastHit < 0.25);
+      ($(id).querySelector('.num') as HTMLElement).textContent = `${Math.ceil((c.hp / CORE_HP) * 100)}%`;
+    }
+    const tl = Math.max(0, g.timeLeft);
+    $('timer').textContent = `${Math.floor(tl / 60)}:${String(Math.floor(tl % 60)).padStart(2, '0')}`;
+    const alive = (t: number) => g.soldiers.filter((s) => s.team === t && s.alive).length;
+    $('alive-blue').textContent = String(alive(0));
+    $('alive-red').textContent = String(alive(1));
+
+    // vitals
+    const hpFill = $('hp-fill');
+    hpFill.style.width = `${p.hp}%`;
+    hpFill.classList.toggle('low', p.hp < 35);
+    $('hp-num').textContent = String(Math.ceil(p.hp));
+    if (p.hp < this.lastHp - 0.5) $('vitals').classList.add('flash');
+    else $('vitals').classList.remove('flash');
+    this.lastHp = p.hp;
+    const item = ITEMS.find((i) => i.id === p.item)!;
+    $('item').innerHTML = `<b>${p.c4.length > 0 ? 'DETONATE' : item.name}</b><span>${p.c4.length > 0 ? `${p.c4.length} armed` : `× ${p.itemCount}`}</span><kbd>${touch ? '' : 'G'}</kbd>`;
+    // weapons
+    const w = p.weapon;
+    const o = p.weapons[1 - p.current];
+    $('wpn-name').textContent = w.def.name;
+    $('wpn-cat').textContent = w.def.category;
+    $('ammo').textContent = String(w.ammo);
+    $('reserve').textContent = `/ ${w.reserve}`;
+    $('ammo').classList.toggle('low', w.ammo <= Math.ceil(w.stats.mag * 0.25));
+    $('wpn-alt').textContent = `${touch ? '⇄' : 'Q'} ${o.def.name} · ${o.ammo}`;
+    const rl = $('reload-bar');
+    if (w.reloading) {
+      rl.style.opacity = '1';
+      (rl.firstElementChild as HTMLElement).style.width = `${(1 - w.reloadT / w.stats.reload) * 100}%`;
+    } else rl.style.opacity = '0';
+    const spin = $('spin');
+    spin.style.opacity = w.stats.spinUp > 0 ? '1' : '0';
+    if (w.stats.spinUp > 0) (spin.firstElementChild as HTMLElement).style.width = `${w.spin * 100}%`;
+
+    // crosshair
+    if (!touch && p.alive) {
+      this.cross.style.display = 'block';
+      this.cross.style.transform = `translate(${mouseX}px, ${mouseY}px)`;
+      const cam = g.renderer.camera;
+      const camDist = cam.position.distanceTo(g.pc.focus);
+      const worldH = 2 * camDist * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2));
+      const aimDist = Math.hypot(g.pc.aimPoint.x - p.pos.x, g.pc.aimPoint.z - p.pos.z);
+      const r = Math.max(5, (p.spread() * aimDist * window.innerHeight) / worldH);
+      this.crossRing.style.width = this.crossRing.style.height = `${r * 2}px`;
+      this.cross.classList.toggle('enemy', !!g.pc.aimTarget && g.pc.aimTarget.team !== p.team);
+      this.cross.classList.toggle('reload', w.reloading);
+    } else this.cross.style.display = 'none';
+
+    // respawn
+    if (!p.alive && !g.over) {
+      this.respawnEl.style.display = 'flex';
+      const left = Math.max(0, p.respawnAt - g.time);
+      $('respawn-time').textContent = left.toFixed(1);
+      $('respawn-by').textContent = p.lastAttacker && p.lastAttacker !== p ? `Eliminated by ${p.lastAttacker.name} · ${p.lastAttacker.weapon.def.name}` : 'You were eliminated';
+    } else this.respawnEl.style.display = 'none';
+
+    // scoreboard
+    if (g.input.down('Tab')) {
+      this.scoreEl.style.display = 'block';
+      this.renderScoreboard();
+    } else this.scoreEl.style.display = 'none';
+
+    this.drawOverlay();
+    this.mapT -= dt;
+    if (g.minimapDirty && this.mapT <= 0) {
+      this.buildMap();
+      g.minimapDirty = false;
+      this.mapT = 1.5;
+    }
+    this.drawMinimap();
+  }
+
+  private renderScoreboard() {
+    const g = this.game;
+    const rows = (team: number) =>
+      g.soldiers
+        .filter((s) => s.team === team)
+        .sort((a, b) => b.kills - a.kills)
+        .map((s) => `<tr class="${s.isPlayer ? 'me' : ''} ${s.alive ? '' : 'dead'}"><td>${esc(s.name)}</td><td>${s.weapon.def.name}</td><td>${s.kills}</td><td>${s.deaths}</td><td>${Math.round(s.coreDamage)}</td></tr>`)
+        .join('');
+    this.scoreEl.innerHTML = `<div class="sb-team blue"><h3>Blue</h3><table><tr><th>Name</th><th>Weapon</th><th>K</th><th>D</th><th>Core dmg</th></tr>${rows(0)}</table></div><div class="sb-team red"><h3>Red</h3><table><tr><th>Name</th><th>Weapon</th><th>K</th><th>D</th><th>Core dmg</th></tr>${rows(1)}</table></div>`;
+  }
+
+  private project(x: number, y: number, z: number) {
+    const v = this.v.set(x, y, z).project(this.game.renderer.camera);
+    return { x: (v.x * 0.5 + 0.5) * window.innerWidth, y: (-v.y * 0.5 + 0.5) * window.innerHeight, on: v.z < 1 && Math.abs(v.x) < 1.1 && Math.abs(v.y) < 1.1 };
+  }
+
+  private drawOverlay() {
+    const g = this.game;
+    const ctx = this.ctx;
+    const p = g.player;
+    ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    const thermal = p.alive && p.ads && p.weapon.stats.thermal;
+    ctx.font = '600 11px "Chakra Petch", system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    for (const s of g.soldiers) {
+      if (!s.alive || s === p) continue;
+      const ally = s.team === p.team;
+      const intel = g.intel[p.team].get(s.id);
+      const seen = ally || (intel && g.time - intel.t < 0.6) || s.markedUntil > g.time;
+      const sc = this.project(s.pos.x, s.pos.y + 2.25, s.pos.z);
+      if (!sc.on) continue;
+      if (thermal && !ally) {
+        const dx = s.pos.x - p.pos.x, dz = s.pos.z - p.pos.z;
+        const d = Math.hypot(dx, dz);
+        const dot = (dx * Math.sin(p.yaw) + dz * Math.cos(p.yaw)) / d;
+        if (d < 55 && dot > 0.6) {
+          const b = this.project(s.pos.x, s.pos.y + 0.9, s.pos.z);
+          ctx.strokeStyle = 'rgba(255,140,60,0.95)';
+          ctx.lineWidth = 2;
+          ctx.shadowColor = '#ff7a2a';
+          ctx.shadowBlur = 12;
+          ctx.strokeRect(b.x - 12, b.y - 24, 24, 40);
+          ctx.shadowBlur = 0;
+        }
+      }
+      if (!seen) continue;
+      const w = 34;
+      ctx.fillStyle = 'rgba(8,12,10,0.55)';
+      ctx.fillRect(sc.x - w / 2 - 1, sc.y - 1, w + 2, 6);
+      ctx.fillStyle = ally ? '#5aa2ff' : '#ff5a4a';
+      ctx.fillRect(sc.x - w / 2, sc.y, (w * s.hp) / 100, 4);
+      if (ally) {
+        ctx.fillStyle = 'rgba(230,240,255,0.92)';
+        ctx.fillText(s.name, sc.x, sc.y - 4);
+      }
+      if (s.markedUntil > g.time && !ally) {
+        ctx.fillStyle = '#ffcf4a';
+        ctx.fillText('◆', sc.x, sc.y - 6);
+      }
+    }
+    // enemy core marker when off screen or far
+    const ec = g.cores[1 - p.team];
+    if (ec.alive) {
+      const sc = this.project(ec.pos.x, ec.pos.y + 4, ec.pos.z);
+      const cx = Math.min(window.innerWidth - 30, Math.max(30, sc.x));
+      const cy = Math.min(window.innerHeight - 30, Math.max(70, sc.y));
+      const off = !sc.on;
+      ctx.fillStyle = off ? 'rgba(255,90,70,0.9)' : 'rgba(255,90,70,0.65)';
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - 9);
+      ctx.lineTo(cx + 8, cy);
+      ctx.lineTo(cx, cy + 9);
+      ctx.lineTo(cx - 8, cy);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      const d = Math.hypot(ec.pos.x - p.pos.x, ec.pos.z - p.pos.z);
+      ctx.fillText(`${Math.round(d)}m`, cx, cy + 22);
+    }
+    // own core warning
+    const oc = g.cores[p.team];
+    if (g.time - oc.lastHit < 3) {
+      const sc = this.project(oc.pos.x, oc.pos.y + 4, oc.pos.z);
+      const cx = Math.min(window.innerWidth - 30, Math.max(30, sc.x));
+      const cy = Math.min(window.innerHeight - 30, Math.max(70, sc.y));
+      ctx.fillStyle = `rgba(90,160,255,${0.5 + 0.5 * Math.sin(g.time * 12)})`;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 9, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // grenade / c4 warnings near the player
+    for (const pr of g.projectiles) {
+      if ((pr.kind === 'frag' || pr.kind === 'c4') && pr.team !== p.team && Math.hypot(pr.pos.x - p.pos.x, pr.pos.z - p.pos.z) < 7) {
+        const sc = this.project(pr.pos.x, pr.pos.y + 0.6, pr.pos.z);
+        ctx.fillStyle = '#ffcf4a';
+        ctx.font = '700 16px system-ui';
+        ctx.fillText('⚠', sc.x, sc.y);
+        ctx.font = '600 11px "Chakra Petch", system-ui, sans-serif';
+      }
+    }
+    // laser sight line
+    if (p.alive && p.weapon.stats.laser) {
+      const a = this.project(p.muzzle.x, p.muzzle.y, p.muzzle.z);
+      const b = this.project(g.pc.aimPoint.x, g.pc.aimPoint.y, g.pc.aimPoint.z);
+      const grad = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
+      grad.addColorStop(0, 'rgba(255,40,40,0.55)');
+      grad.addColorStop(1, 'rgba(255,40,40,0.05)');
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+    // touch sticks
+    const inp = g.input;
+    if (inp.touch) {
+      for (const s of [inp.move, inp.look]) {
+        if (!s.active) continue;
+        ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(s.ox, s.oy, 60, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.fillStyle = s === inp.look && Math.hypot(s.x, s.y) > 0.55 ? 'rgba(255,110,80,0.6)' : 'rgba(255,255,255,0.45)';
+        ctx.beginPath();
+        ctx.arc(s.ox + s.x * 60, s.oy + s.y * 60, 24, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  private buildMap() {
+    const w = this.game.world;
+    const c = this.mapImg.getContext('2d')!;
+    const img = c.createImageData(this.mapImg.width, this.mapImg.height);
+    const col = new THREE.Color();
+    for (let mx = 0; mx < this.mapImg.width; mx++)
+      for (let mz = 0; mz < this.mapImg.height; mz++) {
+        const x = mx * 2, z = mz * 2;
+        const k = x * WZ + z;
+        const top = w.top[k];
+        const fl = w.floor[k];
+        const m = w.vox[k * 64 + Math.max(0, top - 1)];
+        let r, g, b;
+        if (fl * VOXEL < WATER_Y && top * VOXEL < WATER_Y + 0.5) {
+          const depth = WATER_Y - fl * VOXEL;
+          r = 40 - depth * 10;
+          g = 120 - depth * 15;
+          b = 140 - depth * 8;
+        } else {
+          col.setHex(MATS[m]?.color ?? 0x666666);
+          const shade = 0.7 + Math.min(0.5, top / 60);
+          r = col.r * 255 * shade;
+          g = col.g * 255 * shade;
+          b = col.b * 255 * shade;
+          // wait: Color.setHex converts to linear, so lift back up roughly
+          r = Math.sqrt(r / 255) * 255;
+          g = Math.sqrt(g / 255) * 255;
+          b = Math.sqrt(b / 255) * 255;
+          if (top - fl > 6) {
+            r *= 0.75;
+            g *= 0.8;
+            b *= 0.75;
+          }
+        }
+        const i = (mz * this.mapImg.width + mx) * 4;
+        img.data[i] = r;
+        img.data[i + 1] = g;
+        img.data[i + 2] = b;
+        img.data[i + 3] = 255;
+      }
+    c.putImageData(img, 0, 0);
+  }
+
+  private drawMinimap() {
+    const g = this.game;
+    const ctx = this.mctx;
+    const S = this.mini.clientWidth || 170;
+    const p = g.player;
+    ctx.clearRect(0, 0, S, S);
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(0, 0, S, S, 14);
+    ctx.clip();
+    ctx.globalAlpha = 0.92;
+    ctx.drawImage(this.mapImg, 0, 0, S, S);
+    ctx.globalAlpha = 1;
+    const sx = S / MAP_W, sz = S / MAP_D;
+    // view footprint
+    const f = g.pc.focus;
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+    ctx.lineWidth = 1;
+    const vw = 26 * g.pc.zoom, vh = 17 * g.pc.zoom;
+    ctx.strokeRect((f.x - vw) * sx, (f.z - vh) * sz, vw * 2 * sx, vh * 2 * sz);
+    // cores
+    for (const c of g.cores) {
+      ctx.fillStyle = c.team === 0 ? '#4d95ff' : '#ff5a48';
+      ctx.globalAlpha = c.alive ? 1 : 0.3;
+      ctx.fillRect(c.pos.x * sx - 5, c.pos.z * sz - 5, 10, 10);
+      ctx.strokeStyle = '#fff';
+      ctx.strokeRect(c.pos.x * sx - 5, c.pos.z * sz - 5, 10, 10);
+      ctx.globalAlpha = 1;
+    }
+    for (const s of g.soldiers) {
+      if (!s.alive || s === p) continue;
+      const ally = s.team === p.team;
+      if (!ally) {
+        const intel = g.intel[p.team].get(s.id);
+        const seen = (intel && g.time - intel.t < 3) || s.markedUntil > g.time || (s.spottedUntil > g.time && Math.hypot(s.pos.x - p.pos.x, s.pos.z - p.pos.z) < 45);
+        if (!seen) continue;
+      }
+      ctx.fillStyle = ally ? '#6db0ff' : '#ff5a48';
+      ctx.beginPath();
+      ctx.arc(s.pos.x * sx, s.pos.z * sz, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // player arrow
+    ctx.save();
+    ctx.translate(p.pos.x * sx, p.pos.z * sz);
+    ctx.rotate(-p.yaw + Math.PI);
+    ctx.fillStyle = '#fff6c0';
+    ctx.beginPath();
+    ctx.moveTo(0, -6);
+    ctx.lineTo(4.5, 5);
+    ctx.lineTo(-4.5, 5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    ctx.restore();
+  }
+}
+
+function esc(s: string) {
+  return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
+}
+
+export { Soldier };
