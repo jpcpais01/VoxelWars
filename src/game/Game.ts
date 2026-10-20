@@ -4,6 +4,7 @@ import { mulberry32 } from '../core/noise';
 import { Audio } from '../audio/Audio';
 import { Debris, Particles } from '../render/effects';
 import { Renderer } from '../render/Renderer';
+import { ViewLight, Viewmodel } from '../render/Viewmodel';
 import { shared } from '../render/shaderlib';
 import { ChunkManager } from '../world/ChunkManager';
 import { Destruction } from '../world/destruction';
@@ -83,7 +84,10 @@ const BOT_NAMES = ['Viper', 'Maple', 'Kodiak', 'Juno', 'Rook', 'Sable', 'Fennec'
 
 const tmpV = new THREE.Vector3();
 const tmpD = new THREE.Vector3();
+const tmpR = new THREE.Vector3();
+const tmpU = new THREE.Vector3();
 const hit = newHit();
+const tmpQ = new THREE.Quaternion();
 
 export class Game {
   time = 0;
@@ -100,6 +104,7 @@ export class Game {
   intel: Map<number, { s: Soldier; x: number; z: number; t: number }>[] = [new Map(), new Map()];
   readonly particles: Particles;
   readonly debris: Debris;
+  readonly viewmodel = new Viewmodel();
   readonly destruction: Destruction;
   readonly nav: Nav;
   navBudget = 3;
@@ -139,6 +144,7 @@ export class Game {
     readonly ev: GameEvents,
   ) {
     const scene = renderer.scene;
+    renderer.viewmodel = this.viewmodel;
     this.particles = new Particles(renderer.fxScene);
     this.debris = new Debris(world, scene);
     this.nav = new Nav(world);
@@ -206,6 +212,7 @@ export class Game {
     }
     for (const b of this.bots) b.onRespawn();
     this.pc = new PlayerController(this.player, this.input, this);
+    this.viewmodel.setWeapon(this.player);
     this.running = true;
     this.ev.onMessage('Destroy the enemy core. Defend yours.', 'info');
   }
@@ -281,27 +288,36 @@ export class Game {
     if (this.world.solidAt(m.x, m.y, m.z)) m.set(s.pos.x, s.pos.y + 1.25, s.pos.z);
     this.audio.gunshot(m, def.sound, st.suppressed, s.isPlayer);
     this.noises.push({ x: m.x, z: m.z, t: this.time, team: s.team, radius: (st.suppressed ? 9 : 42) * st.loud });
-    if (!st.suppressed) {
-      s.spottedUntil = Math.max(s.spottedUntil, this.time + 1.5);
+    if (!st.suppressed) s.spottedUntil = Math.max(s.spottedUntil, this.time + 1.5);
+    if (s.isPlayer) {
+      // the viewmodel draws the flash; the world only gets its light
+      this.viewmodel.onShot(s);
+      this.pc.onShot();
+      if (!st.suppressed) this.renderer.flashAt(m.x + s.aimDir.x * 0.8, m.y - 0.1, m.z + s.aimDir.z * 0.8, def.model.bulky ? 7 : 4.5, 0xffb060, 0.05);
+      this.renderer.shake = Math.min(0.5, this.renderer.shake + st.recoil * (def.model.bulky ? 2 : 1.2));
+    } else if (!st.suppressed) {
       this.particles.muzzle(m.x, m.y, m.z, s.aimDir.x, s.aimDir.z, def.model.bulky ? 1.4 : 1);
-      if (s.isPlayer || Math.random() < 0.5) this.renderer.flashAt(m.x, m.y + 0.2, m.z, def.model.bulky ? 9 : 6, 0xffb060, 0.06);
+      if (Math.random() < 0.5) this.renderer.flashAt(m.x, m.y + 0.2, m.z, def.model.bulky ? 9 : 6, 0xffb060, 0.06);
     }
-    if (s.isPlayer) this.renderer.shake = Math.min(0.5, this.renderer.shake + st.recoil * (def.model.bulky ? 3 : 2));
     const spread = s.spread() * s.spreadMul;
     s.pelletsFired += st.pellets;
+    const right = tmpR.set(s.aimDir.z, 0, -s.aimDir.x);
+    if (right.lengthSq() < 1e-6) right.set(1, 0, 0);
+    right.normalize();
+    const up = tmpU.crossVectors(right, s.aimDir).normalize();
     for (let i = 0; i < st.pellets; i++) {
       tmpD.copy(s.aimDir);
-      // gaussian-ish cone
+      // gaussian-ish cone around the aim
       const a = Math.random() * Math.PI * 2;
       const r = spread * Math.sqrt(Math.random());
-      const right = tmpV.set(tmpD.z, 0, -tmpD.x).normalize();
-      tmpD.addScaledVector(right, Math.cos(a) * r);
-      tmpD.y += Math.sin(a) * r * 0.5;
+      tmpD.addScaledVector(right, Math.cos(a) * r).addScaledVector(up, Math.sin(a) * r);
       tmpD.normalize();
       const kind: ProjKind = st.projectile === 'rocket' ? 'rocket' : st.projectile === 'grenade' ? 'grenade' : 'bullet';
+      // the player's rockets and grenades appear a little ahead of the eye
+      const start = s.isPlayer && kind !== 'bullet' ? m.clone().addScaledVector(s.aimDir, 0.6).add(tmpV.set(0, -0.12, 0)) : m.clone();
       const p: Proj = {
         kind,
-        pos: m.clone(),
+        pos: start,
         vel: tmpD.clone().multiplyScalar(st.velocity * (0.97 + Math.random() * 0.06)),
         owner: s,
         team: s.team,
@@ -348,6 +364,16 @@ export class Game {
       return;
     }
     s.itemCount--;
+    if (s.isPlayer) {
+      // first person: lob along the view
+      const f = this.pc.forward;
+      const from = this.pc.eye.clone().addScaledVector(f, 0.45).add(new THREE.Vector3(0, -0.15, 0));
+      const vel = f.clone().multiplyScalar(s.item === 'c4' ? 10 : 15).add(new THREE.Vector3(0, s.item === 'c4' ? 2.5 : 4.5, 0));
+      vel.x += s.vel.x * 0.5;
+      vel.z += s.vel.z * 0.5;
+      this.throwItem(s, from, vel);
+      return;
+    }
     const from = new THREE.Vector3(s.pos.x, s.pos.y + 1.5, s.pos.z);
     const tgt = s.intent.aim;
     let dx = tgt.x - from.x, dz = tgt.z - from.z;
@@ -367,6 +393,10 @@ export class Game {
     const T = 0.45 + d / 18;
     const g = 18;
     const vel = new THREE.Vector3(dx / T, (ty - from.y + 0.5 * g * T * T) / T, dz / T);
+    this.throwItem(s, from, vel);
+  }
+
+  private throwItem(s: Soldier, from: THREE.Vector3, vel: THREE.Vector3) {
     const kind: ProjKind = s.item === 'frag' ? 'frag' : s.item === 'smoke' ? 'smoke' : 'c4';
     const mesh = new THREE.Mesh(kind === 'c4' ? this.c4Geo : this.grenadeGeo, toyMaterial);
     mesh.castShadow = true;
@@ -425,7 +455,8 @@ export class Game {
     const dir = tmpD.copy(p.vel).divideScalar(speed);
     // tracer visual
     const bright = st.tracer ? 2.2 : 1;
-    if (Math.random() < (st.pellets > 1 ? 0.35 : 1)) this.particles.tracer(p.pos.x, p.pos.y, p.pos.z, p.vel.x, p.vel.y, p.vel.z, bright, Math.min(0.05, dt * 1.2));
+    const nearEye = p.owner.isPlayer && p.traveled < 3.5;
+    if (!nearEye && Math.random() < (st.pellets > 1 ? 0.35 : 1)) this.particles.tracer(p.pos.x, p.pos.y, p.pos.z, p.vel.x, p.vel.y, p.vel.z, bright, Math.min(0.05, dt * 1.2));
     // water entry
     if (!p.wet && p.pos.y > WATER_Y && p.pos.y + dir.y * len <= WATER_Y && dir.y < 0) {
       const t = (WATER_Y - p.pos.y) / dir.y;
@@ -690,7 +721,7 @@ export class Game {
   }
 
   addShake(p: THREE.Vector3, amount: number) {
-    const d = Math.hypot(p.x - this.pc.focus.x, p.z - this.pc.focus.z);
+    const d = Math.hypot(p.x - this.pc.eye.x, p.z - this.pc.eye.z);
     this.renderer.shake = Math.min(1.4, this.renderer.shake + amount / (1 + (d * d) / 300));
     if (d < 6 && amount > 0.5) this.renderer.flash = Math.min(0.25, this.renderer.flash + 0.12 * amount);
   }
@@ -919,7 +950,10 @@ export class Game {
           if (Math.random() < 0.35) s.applyLoadout(randomLoadout(this.rng));
           b.onRespawn();
         }
-        if (s.isPlayer) this.pc.spectate = null;
+        if (s.isPlayer) {
+          this.pc.spectate = null;
+          this.pc.faceEnemyCore();
+        }
       }
     }
     // team brains
@@ -967,38 +1001,77 @@ export class Game {
     this.smokes = this.smokes.filter((s) => s.t < s.life);
   }
 
-  /** the camera / cutout / audio bookkeeping that follows a frame update */
+  private sunVis = 1;
+  private sunT = 0;
+  private vmLight: ViewLight = {
+    sunView: new THREE.Vector3(),
+    upView: new THREE.Vector3(),
+    sunColor: new THREE.Color(),
+    sunI: 1,
+    sky: new THREE.Color(),
+    ground: new THREE.Color(),
+    hemiI: 1,
+    sunVis: 1,
+    skyVis: 1,
+  };
+
+  /** the camera / viewmodel / shadow / audio bookkeeping that follows a frame update */
   updateView(dt: number) {
-    this.pc.updateCamera(dt);
-    const cam = this.renderer.camera;
+    const r = this.renderer;
+    const pc = this.pc;
+    pc.updateCamera(dt);
+    const cam = r.camera;
     cam.updateMatrixWorld();
-    const p = this.player.alive ? this.player : this.pc.spectate ?? this.player;
-    // x-ray cutouts around the player and the cursor
-    const pv = tmpV.set(p.pos.x, p.pos.y + 1.0, p.pos.z);
-    const viewZ = -pv.clone().applyMatrix4(cam.matrixWorldInverse).z;
-    pv.project(cam);
-    const camDist = cam.position.distanceTo(this.pc.focus);
-    const rad = 0.16 * (30 / camDist);
-    shared.uCutA.value.set(pv.x * 0.5 + 0.5, pv.y * 0.5 + 0.5, viewZ, rad);
-    shared.uCutH.value.x = p.pos.y + 2.3;
-    const ap = this.pc.aimPoint;
-    const av = tmpV.set(ap.x, ap.y - 0.5, ap.z);
-    const aimZ = -av.clone().applyMatrix4(cam.matrixWorldInverse).z;
-    av.project(cam);
-    const aimFar = Math.hypot(ap.x - p.pos.x, ap.z - p.pos.z) > 4;
-    shared.uCutB.value.set(av.x * 0.5 + 0.5, av.y * 0.5 + 0.5, aimZ, aimFar ? rad * 0.75 : 0);
-    shared.uCutH.value.y = ap.y + 1.2;
-    // tall things between the camera (which sits toward +z) and the focus project onto it
-    this.chunks.updateCutout(p.pos.x, p.pos.z + 2.5, 9, ap.x, ap.z + 2.5, aimFar ? 7 : 0);
-    this.renderer.focusTarget.copy(this.pc.focus);
-    this.renderer.updateShadowCamera(this.pc.focus);
-    this.renderer.hurt = Math.max(0, this.renderer.hurt - dt * 0.8);
-    this.renderer.desat = this.player.alive ? Math.max(0, (35 - this.player.hp) / 35) * 0.6 : 0.7;
-    // audio listener
-    this.audio.listener.copy(this.pc.focus);
-    const rz = this.info.riverZ(this.pc.focus.x);
-    const dRiver = Math.min(Math.abs(this.pc.focus.z - rz), Math.hypot(this.pc.focus.x - MAP_W / 2, this.pc.focus.z - MAP_D / 2) - 8);
+    // first person needs no x-ray cutout: every chunk keeps the fast discard-free shader
+    shared.uCutA.value.w = 0;
+    shared.uCutB.value.w = 0;
+    this.chunks.updateCutout(0, 0, 0, 0, 0, 0);
+    this.chunks.cullGrass(cam.position.x, cam.position.z);
+    // shadows cover the ground ahead of the view
+    const fx = Math.sin(pc.yaw), fz = Math.cos(pc.yaw);
+    const ahead = r.shadowExtent * 0.45;
+    tmpV.set(cam.position.x + fx * ahead, cam.position.y - 1.5, cam.position.z + fz * ahead);
+    r.updateShadowCamera(tmpV);
+    r.focusTarget.copy(pc.aimPoint);
+    r.hurt = Math.max(0, r.hurt - dt * 0.8);
+    r.desat = this.player.alive ? Math.max(0, (35 - this.player.hp) / 35) * 0.6 : 0.7;
+
+    // viewmodel: follows the current weapon, lit like the spot the player stands in
+    const p = this.player;
+    const vm = this.viewmodel;
+    vm.visible = p.alive && !this.over;
+    if (p.alive) {
+      vm.setWeapon(p);
+      this.sunT -= dt;
+      if (this.sunT <= 0) {
+        this.sunT = 0.1;
+        const e = pc.eye;
+        const lit = !this.world.raycast(e.x, e.y, e.z, r.sunDir.x, r.sunDir.y, r.sunDir.z, 60, hit);
+        this.sunTarget = lit ? 1 : 0;
+      }
+      this.sunVis += (this.sunTarget - this.sunVis) * Math.min(1, dt * 6);
+      const L = this.vmLight;
+      const inv = tmpQ.copy(cam.quaternion).invert();
+      L.sunView.copy(r.sunDir).applyQuaternion(inv);
+      L.upView.set(0, 1, 0).applyQuaternion(inv);
+      L.sunColor.copy(r.sun.color);
+      L.sunI = r.sun.intensity;
+      L.sky.copy(r.hemi.color);
+      L.ground.copy(r.hemi.groundColor);
+      L.hemiI = r.hemi.intensity;
+      L.sunVis = this.sunVis;
+      L.skyVis = this.chunks.skyAt(pc.eye.x, pc.eye.y, pc.eye.z);
+      vm.update(dt, p, pc.lookYaw, pc.lookPitch, pc.adsTarget, L);
+    }
+
+    // audio listener at the eye, panning relative to the view
+    this.audio.listener.copy(cam.position);
+    this.audio.listenerYaw = pc.yaw;
+    const lp = cam.position;
+    const rz = this.info.riverZ(lp.x);
+    const dRiver = Math.min(Math.abs(lp.z - rz), Math.hypot(lp.x - MAP_W / 2, lp.z - MAP_D / 2) - 8);
     this.audio.updateAmbience(dt, Math.max(0, dRiver), 0.5 + 0.5 * Math.sin(this.time * 0.1));
     void WEAPON;
   }
+  private sunTarget = 1;
 }

@@ -3,6 +3,7 @@ import { MAP_D, MAP_W, WATER_Y } from '../core/config';
 import { BrightShader, CompositeShader, CopyDepthShader, DownCocShader, DownShader, FsPass, UpShader, makePass } from './post';
 import { shared } from './shaderlib';
 import { Water } from './water';
+import type { Viewmodel } from './Viewmodel';
 
 export type Quality = 'low' | 'medium' | 'high' | 'ultra';
 
@@ -66,7 +67,7 @@ export class Renderer {
   readonly gl: THREE.WebGLRenderer;
   readonly scene = new THREE.Scene();
   readonly fxScene = new THREE.Scene();
-  readonly camera = new THREE.PerspectiveCamera(32, 1, 0.5, 420);
+  readonly camera = new THREE.PerspectiveCamera(32, 1, 0.08, 420);
   readonly sun = new THREE.DirectionalLight(0xffe9c9, 3.25);
   /** Twin of the sun living in the effects scene; shares the shadow map so water receives shadows. */
   private fxSun = new THREE.DirectionalLight(0xffe9c9, 3.25);
@@ -75,6 +76,10 @@ export class Renderer {
   private flashLife: number[] = [];
   readonly sunDir = new THREE.Vector3(-0.55, 0.68, 0.48).normalize();
   water!: Water;
+  /** first-person weapon, drawn into the main buffer after the world */
+  viewmodel: Viewmodel | null = null;
+  /** miniature tilt-shift depth of field (menu flyover); off in first person */
+  tiltShift = true;
 
   private rtMain!: THREE.WebGLRenderTarget;
   private rtHalf!: THREE.WebGLRenderTarget;
@@ -125,6 +130,8 @@ export class Renderer {
     sc.bottom = -34;
     sc.near = 1;
     sc.far = 160;
+    // the player's own body lives on layer 1: invisible to the eye, but it still casts a shadow
+    sc.layers.enable(1);
     this.scene.add(this.sun, this.sun.target, this.hemi);
     this.fxSun.castShadow = true;
     this.fxSun.shadow = this.sun.shadow;
@@ -146,6 +153,7 @@ export class Renderer {
       uFocus: { value: 30 },
       uFocusRange: { value: 18 },
       uDof: { value: 1 },
+      uTilt: { value: 1 },
     });
     this.brightMat = makePass(BrightShader, { tColor: { value: null }, uTexel: { value: new THREE.Vector2() }, uThreshold: { value: 1.25 } });
     this.dsMat = makePass(DownShader, { tColor: { value: null }, uTexel: { value: new THREE.Vector2() } });
@@ -175,6 +183,9 @@ export class Renderer {
       uMist: { value: 1 },
       uMistY: { value: WATER_Y + 0.25 },
       uMistCol: { value: new THREE.Color(0xd9e6e4) },
+      uSkyTop: { value: new THREE.Color(0x5d9ad6) },
+      uSunDisc: { value: new THREE.Color(0xffe9c9) },
+      uUnder: { value: 0 },
     });
     this.addSkirt();
   }
@@ -203,6 +214,8 @@ export class Renderer {
     c.uMist.value = L.mist;
     c.uMistCol.value.setHex(L.mistCol);
     c.uExposure.value = L.exposure;
+    c.uSkyTop.value.setHex(L.skyTop);
+    c.uSunDisc.value.setHex(L.sun).multiplyScalar(id === 'overcast' ? 0.6 : 14);
     if (this.water) {
       this.water.uniforms.uSkyTop.value.setHex(L.skyTop);
       this.water.uniforms.uSkyHor.value.setHex(L.skyHor);
@@ -430,6 +443,13 @@ export class Renderer {
     gl.setRenderTarget(this.rtMain);
     gl.render(this.fxScene, cam);
 
+    // 3b. first-person weapon on top (its depth is squeezed in front of everything)
+    const vm = this.viewmodel;
+    if (vm && vm.visible) {
+      vm.resize(cam.aspect);
+      gl.render(vm.scene, vm.camera);
+    }
+
     // 4. post
     const doDof = this.q.dof;
     const doBloom = this.q.bloom;
@@ -443,6 +463,7 @@ export class Renderer {
       dm.uFocus.value = cam.position.distanceTo(this.focusTarget);
       dm.uFocusRange.value = 16;
       dm.uDof.value = doDof ? 1 : 0;
+      dm.uTilt.value = this.tiltShift ? 1 : 0;
       this.fs.run(gl, this.downMat, this.rtDown);
     }
     if (doBloom) {
@@ -484,6 +505,7 @@ export class Renderer {
     c.uFlash.value = this.flash;
     c.uDesat.value = this.desat;
     c.uFxaa.value = this.q.fxaa ? 1 : 0;
+    c.uUnder.value = cam.position.y < WATER_Y - 0.03 ? 1 : 0;
     this.fs.run(gl, this.compMat, null);
     this.flash = Math.max(0, this.flash - dt * 3);
   }

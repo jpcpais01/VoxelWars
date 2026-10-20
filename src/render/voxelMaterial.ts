@@ -192,6 +192,9 @@ float ph = uTime * 2.2 + position.x * 0.9 + position.z * 0.7;
 float g = sin(ph) * 0.6 + sin(ph * 2.7 + 0.5) * 0.3 + sin(uTime * 0.6 + position.x * 0.08) * 0.6;
 transformed.xz += uWind * g * 0.09 * w;
 transformed.y -= abs(g) * 0.02 * w;
+// blades sink into the ground with distance so the grass edge never pops
+float gFar = smoothstep(30.0, 42.0, distance(cameraPosition.xz, position.xz));
+transformed.y -= gFar * 0.4 * w;
 vGCol = pow(aCol.rgb, vec3(2.2));
 vGW = w;`,
       )

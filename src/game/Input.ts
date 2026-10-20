@@ -22,6 +22,15 @@ export class Input {
   touchButtons = new Set<string>();
   touchTaps = new Set<string>();
   enabled = false;
+  /** accumulated look motion since the last frame, in pixels (mouse) or touch points */
+  lookDX = 0;
+  lookDY = 0;
+  /** pointer is captured for mouse look */
+  locked = false;
+  /** pointer lock unavailable: look with the plain mouse instead */
+  freeLook = false;
+  private lookX = 0;
+  private lookY = 0;
   private stickR = 60;
 
   constructor(private el: HTMLElement) {
@@ -37,13 +46,30 @@ export class Input {
       this.keys.clear();
       this.lmb = this.rmb = false;
     });
-    el.addEventListener('mousemove', (e) => {
+    document.addEventListener('pointerlockchange', () => {
+      this.locked = document.pointerLockElement === el;
+      if (!this.locked) this.lmb = this.rmb = false;
+    });
+    document.addEventListener('pointerlockerror', () => (this.freeLook = true));
+    window.addEventListener('mousemove', (e) => {
       if (e.movementX || e.movementY) this.touch = false;
       this.mouseX = e.clientX;
       this.mouseY = e.clientY;
+      if (this.enabled && (this.locked || this.freeLook)) {
+        // browsers occasionally report a huge jump right after capture
+        if (Math.abs(e.movementX) < 400 && Math.abs(e.movementY) < 400) {
+          this.lookDX += e.movementX;
+          this.lookDY += e.movementY;
+        }
+      }
     });
     el.addEventListener('mousedown', (e) => {
       if (!this.enabled) return;
+      // the click that captures the pointer does not fire
+      if (!this.locked && !this.freeLook) {
+        this.capture();
+        return;
+      }
       if (e.button === 0) this.lmb = true;
       if (e.button === 2) this.rmb = true;
     });
@@ -68,6 +94,21 @@ export class Input {
     el.addEventListener('touchcancel', (e) => this.onTouch(e, 'end'), { passive: false });
   }
 
+  capture() {
+    if (this.touch || this.locked) return;
+    try {
+      const r = this.el.requestPointerLock?.() as unknown as Promise<void> | undefined;
+      if (r && typeof r.catch === 'function') r.catch(() => (this.freeLook = true));
+      else if (!this.el.requestPointerLock) this.freeLook = true;
+    } catch {
+      this.freeLook = true;
+    }
+  }
+
+  release() {
+    if (document.pointerLockElement) document.exitPointerLock();
+  }
+
   private onTouch(e: TouchEvent, phase: 'start' | 'move' | 'end') {
     this.touch = true;
     if (!this.enabled) return;
@@ -82,12 +123,22 @@ export class Input {
         s.ox = t.clientX;
         s.oy = t.clientY;
         s.x = s.y = 0;
+        if (!left) {
+          this.lookX = t.clientX;
+          this.lookY = t.clientY;
+        }
       } else {
         for (const s of [this.move, this.look]) {
           if (!s.active || s.id !== t.identifier) continue;
           if (phase === 'end') {
             s.active = false;
             s.x = s.y = 0;
+          } else if (s === this.look) {
+            // right thumb drags the view
+            this.lookDX += t.clientX - this.lookX;
+            this.lookDY += t.clientY - this.lookY;
+            this.lookX = t.clientX;
+            this.lookY = t.clientY;
           } else {
             let dx = (t.clientX - s.ox) / this.stickR;
             let dy = (t.clientY - s.oy) / this.stickR;
@@ -113,6 +164,13 @@ export class Input {
 
   hit(code: string) {
     return this.pressed.has(code);
+  }
+
+  /** take the look motion gathered since the last call */
+  takeLook() {
+    const r = { dx: this.lookDX, dy: this.lookDY };
+    this.lookDX = this.lookDY = 0;
+    return r;
   }
 
   endFrame() {

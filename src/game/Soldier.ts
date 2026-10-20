@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { GRAVITY, SOLDIER_HEIGHT, SOLDIER_RADIUS, STEP_HEIGHT, Team, WATER_Y } from '../core/config';
 import { angleDiff, clamp, damp } from '../core/noise';
 import type { Game } from './Game';
-import { SoldierRig, buildSoldier, gunMuzzleZ, setRigGun } from './models';
+import { SoldierRig, buildSoldier, setRigGun } from './models';
+import { gunModel } from './gunVoxels';
 import { Build, ITEMS, ItemId, Loadout, Stats, WEAPON, WeaponDef, computeStats } from './weapons';
 
 export class WeaponState {
@@ -98,6 +99,10 @@ export class Soldier {
   rippleT = 0;
   readonly muzzle = new THREE.Vector3();
   readonly aimDir = new THREE.Vector3(0, 0, -1);
+  /** first-person view (player only): bullets leave the eye along the crosshair */
+  readonly fpAim = new THREE.Vector3(0, 0, 1);
+  readonly fpEye = new THREE.Vector3();
+  private rigLayer = 0;
 
   constructor(
     public name: string,
@@ -180,9 +185,9 @@ export class Soldier {
     const world = game.world;
     const w = this.weapon;
 
-    // aim + facing
+    // aim + facing (the player's heading comes straight from the camera)
     const dx = it.aim.x - this.pos.x, dz = it.aim.z - this.pos.z;
-    if (dx * dx + dz * dz > 0.01) this.yaw = Math.atan2(dx, dz);
+    if (!this.isPlayer && dx * dx + dz * dz > 0.01) this.yaw = Math.atan2(dx, dz);
     this.ads = it.ads && !this.sprinting;
     const wantSprint = it.sprint && !it.fire && Math.hypot(it.moveX, it.moveZ) > 0.3;
     this.sprinting = wantSprint && !this.ads;
@@ -264,13 +269,16 @@ export class Soldier {
 
     // muzzle & aim direction
     this.computeMuzzle();
-    this.aimDir.copy(it.aim).sub(this.muzzle);
-    const ad = this.aimDir.length();
-    if (ad < 0.5) this.aimDir.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
-    else this.aimDir.divideScalar(ad);
-    // keep shots mostly level unless deliberately aiming up/down
-    this.aimDir.y = clamp(this.aimDir.y, -0.55, 0.55);
-    this.aimDir.normalize();
+    if (this.isPlayer) this.aimDir.copy(this.fpAim);
+    else {
+      this.aimDir.copy(it.aim).sub(this.muzzle);
+      const ad = this.aimDir.length();
+      if (ad < 0.5) this.aimDir.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+      else this.aimDir.divideScalar(ad);
+      // keep shots mostly level unless deliberately aiming up/down
+      this.aimDir.y = clamp(this.aimDir.y, -0.55, 0.55);
+      this.aimDir.normalize();
+    }
 
     // firing
     const s = w.stats;
@@ -291,7 +299,7 @@ export class Soldier {
         w.cooldown = Math.max(w.cooldown, 0) + 60 / s.rpm;
         this.lastShot = t;
         game.fireWeapon(this, w);
-        w.bloom = Math.min(w.bloom + s.recoil, s.recoil * 12 + 0.05);
+        w.bloom = Math.min(w.bloom + s.recoil * 0.8, s.recoil * 7 + 0.03);
         if (w.ammo <= 0 && w.reserve > 0) {
           this.startReload();
           game.audio.reload(this.pos, this.isPlayer);
@@ -319,10 +327,21 @@ export class Soldier {
   }
 
   computeMuzzle() {
-    const def = this.weapon.def;
-    const f = gunMuzzleZ(def, this.weapon.build) + 0.33;
+    if (this.isPlayer) {
+      this.muzzle.copy(this.fpEye);
+      return;
+    }
+    const m = gunModel(this.weapon.def, this.weapon.build).muzzle;
+    const f = m.z + 0.33;
     const sy = Math.sin(this.bodyYaw), cy = Math.cos(this.bodyYaw);
-    this.muzzle.set(this.pos.x + sy * f + cy * 0.06, this.pos.y + 1.25 + (def.model.tube ? 0.12 : 0), this.pos.z + cy * f - sy * 0.06);
+    this.muzzle.set(this.pos.x + sy * f + cy * 0.06, this.pos.y + 1.2 + m.y, this.pos.z + cy * f - sy * 0.06);
+  }
+
+  /** the player's own body is drawn only into the shadow map while they look through its eyes */
+  private setRigLayer(layer: number) {
+    if (this.rigLayer === layer) return;
+    this.rigLayer = layer;
+    this.rig.root.traverse((o) => o.layers.set(layer));
   }
 
   private move(game: Game, dt: number) {
@@ -411,10 +430,12 @@ export class Soldier {
     rig.gunMount.rotation.x = this.sprinting ? 0.5 : -kick * 2 - (this.weapon.reloading ? 0.6 : 0);
     rig.body.rotation.x = 0;
     rig.root.visible = true;
-    rig.ring.visible = true;
+    rig.ring.visible = !this.isPlayer;
+    if (this.isPlayer) this.setRigLayer(1);
   }
 
   private updateDead(game: Game, dt: number) {
+    if (this.isPlayer) this.setRigLayer(0);
     this.deathT += dt;
     const rig = this.rig;
     if (this.deathT < 0.5) {

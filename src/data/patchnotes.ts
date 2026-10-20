@@ -7,6 +7,17 @@ export interface PatchGroup {
 
 export const PATCH_NOTES: PatchGroup[] = [
   {
+    hour: '2026-10-20 · 18:00 UTC',
+    title: 'Through Your Own Eyes',
+    entries: [
+      'VoxelWars is now first person. Click the game to capture the mouse and look around freely; WASD moves relative to where you face. Settings has new Look sensitivity and Field of view sliders. On phones, the left thumb moves, a drag on the right looks, and a gentle aim assist slows and nudges your view onto nearby enemies.',
+      'Every weapon is rebuilt from 1 cm voxels: receivers with ejection ports and rails, curved mags, wood stocks, a fluted sniper barrel, a spinning six-barrel Buzzsaw, a revolving Thumper drum and a Thunder RPG with its warhead peeking out. Every attachment shows on the gun, and bots carry the same models.',
+      'Your gun lives in your hands now: gloved hands and team-coloured sleeves, walk bob, look sway, recoil that kicks the view, reloads that drop and swap the magazine, pump and bolt cycling, and a real muzzle flash. Aim down iron sights, red dots and holo reticles; 3x, 8x and thermal optics zoom in behind a proper scope.',
+      'The valley at eye level: a new sky with a sun disc and drifting clouds that match the cloud shadows on the ground, haze that melts into the horizon, sharp shadows that follow your view, soft blur only in the far distance, grass that fades out gently, and a murky tint under the river.',
+      'Combat follows the crosshair: shots leave from your eye along your aim with a true round spread, grenades fly along your view, hit indicators and sound panning follow where you face, the minimap shows your view cone, and when you go down the camera rises to watch whoever got you.',
+    ],
+  },
+  {
     hour: '2026-10-20 · 17:00 UTC',
     title: 'Next Level: Light, Water and Glory',
     entries: [

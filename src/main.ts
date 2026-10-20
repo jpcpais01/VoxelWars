@@ -27,6 +27,8 @@ interface Settings {
   quality: Quality | 'auto';
   volume: number;
   zoom: number;
+  sens: number;
+  fov: number;
   fps: boolean;
   difficulty: Difficulty;
   lighting: LightingId;
@@ -35,7 +37,7 @@ interface Settings {
 const SETTINGS_KEY = 'voxelwars.settings.v1';
 const coarse = matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
 function loadSettings(): Settings {
-  const def: Settings = { quality: 'auto', volume: 0.8, zoom: 1, fps: false, difficulty: 'regular', lighting: 'morning', minutes: 15 };
+  const def: Settings = { quality: 'auto', volume: 0.8, zoom: 1, sens: 1, fov: 90, fps: false, difficulty: 'regular', lighting: 'morning', minutes: 15 };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) return { ...def, ...JSON.parse(raw) };
@@ -99,6 +101,8 @@ const TIPS = [
   'Your base supply depot refills ammo and equipment.',
   'Craters next to the river flood. So do the bots who stand in them.',
   'Golden hour casts long shadows: great for spotting movement across the valley.',
+  'Aim down sights with the right mouse button. Scopes zoom in, and so does your sensitivity.',
+  'Sprinting lowers your gun. Stop a moment before you round a corner.',
   'Assists, headshots, multi-kills and core damage all add to your score.',
 ];
 
@@ -168,7 +172,7 @@ async function boot() {
   chunks.primeMaterials();
   renderer.gl.compile(renderer.scene, renderer.camera);
   chunks.updateCutout(0, 0, 0, 0, 0, 0);
-  if (new URLSearchParams(location.search).has('debug')) Object.assign(window, { vw: { game, renderer, world } });
+  if (new URLSearchParams(location.search).has('debug')) Object.assign(window, { vw: { game, renderer, world, editor } });
   await progress(1, 'Ready');
   clearInterval(tipTimer);
   $('loading').classList.add('hidden');
@@ -238,6 +242,7 @@ function openPanel(id: string) {
   audio.uiClick();
   $(id).classList.add('open');
   input.enabled = false;
+  input.release();
   syncPauseOverlay();
 }
 function closePanel(id: string) {
@@ -255,9 +260,19 @@ function anyPanelOpen() {
   return document.querySelectorAll('.panel-screen.open').length > 0;
 }
 function refreshInputEnabled() {
-  input.enabled = state === 'playing' && !paused && !anyPanelOpen();
+  input.enabled = state === 'playing' && !paused && !anyPanelOpen() && !editor.isOpen && !game?.over;
   document.body.classList.toggle('playing', input.enabled);
+  if (input.enabled) input.capture();
+  else input.release();
 }
+
+// losing the mouse (Esc, alt-tab) while playing pauses the match
+let lastUnlock = 0;
+document.addEventListener('pointerlockchange', () => {
+  if (document.pointerLockElement) return;
+  lastUnlock = performance.now();
+  if (state === 'playing' && !paused && input.enabled && !game.over) setPaused(true);
+});
 
 document.querySelectorAll<HTMLElement>('[data-close]').forEach((b) =>
   b.addEventListener('click', () => {
@@ -269,6 +284,7 @@ document.querySelectorAll<HTMLElement>('[data-close]').forEach((b) =>
 function openLoadout() {
   audio.uiClick();
   input.enabled = false;
+  input.release();
   editor.open();
   syncPauseOverlay();
 }
@@ -289,7 +305,10 @@ const qualityBtns = $('set-quality').querySelectorAll<HTMLButtonElement>('button
 function syncSettingsUI() {
   qualityBtns.forEach((b) => b.classList.toggle('on', b.dataset.q === settings.quality));
   $<HTMLInputElement>('set-volume').value = String(settings.volume);
-  $<HTMLInputElement>('set-zoom').value = String(settings.zoom);
+  $<HTMLInputElement>('set-sens').value = String(settings.sens);
+  $<HTMLInputElement>('set-fov').value = String(settings.fov);
+  $('fov-val').textContent = `${settings.fov}°`;
+  $('sens-val').textContent = settings.sens.toFixed(2);
   $<HTMLInputElement>('set-fps').checked = settings.fps;
 }
 function applySettings() {
@@ -299,7 +318,10 @@ function applySettings() {
     chunks?.setGrass(renderer.q.grass);
   }
   audio.setVolume(settings.volume);
-  if (game?.pc) game.pc.zoom = settings.zoom;
+  if (game?.pc) {
+    game.pc.sensitivity = settings.sens;
+    game.pc.fov = settings.fov;
+  }
   if (hud) hud.showFps = settings.fps;
   saveSettings();
 }
@@ -315,8 +337,14 @@ $<HTMLInputElement>('set-volume').addEventListener('input', (e) => {
   settings.volume = +(e.target as HTMLInputElement).value;
   applySettings();
 });
-$<HTMLInputElement>('set-zoom').addEventListener('input', (e) => {
-  settings.zoom = +(e.target as HTMLInputElement).value;
+$<HTMLInputElement>('set-sens').addEventListener('input', (e) => {
+  settings.sens = +(e.target as HTMLInputElement).value;
+  $('sens-val').textContent = settings.sens.toFixed(2);
+  applySettings();
+});
+$<HTMLInputElement>('set-fov').addEventListener('input', (e) => {
+  settings.fov = +(e.target as HTMLInputElement).value;
+  $('fov-val').textContent = `${settings.fov}°`;
   applySettings();
 });
 $<HTMLInputElement>('set-fps').addEventListener('change', (e) => {
@@ -370,6 +398,8 @@ function setPaused(p: boolean) {
 
 window.addEventListener('keydown', (e) => {
   if (e.code !== 'Escape' || state !== 'playing') return;
+  // the browser already used this Esc to release the mouse (and we paused for it)
+  if (performance.now() - lastUnlock < 400) return;
   if (editor.isOpen) editor.close();
   else if ($('settings').classList.contains('open')) closePanel('settings');
   else setPaused(!paused);
@@ -420,8 +450,9 @@ function deploy() {
   state = 'playing';
   $('menu').classList.add('hidden');
   $('hud').classList.remove('hidden');
-  renderer.shadowExtent = 34;
+  renderer.shadowExtent = 44;
   renderer.shadowForce = true;
+  renderer.tiltShift = false;
   game.start('You', JSON.parse(JSON.stringify(editor.loadout)), { difficulty: settings.difficulty, minutes: settings.minutes });
   hud = new HUD(game);
   applySettings();
@@ -522,6 +553,10 @@ function frame(now: number) {
     const o = game.info.menuOrbit;
     orbitTarget.set(o.x + Math.cos(menuAngle * 0.7) * 10, 6, o.z + Math.sin(menuAngle * 0.7) * 10);
     const cam = renderer.camera;
+    if (cam.fov !== 32) {
+      cam.fov = 32;
+      cam.updateProjectionMatrix();
+    }
     cam.position.set(orbitTarget.x + Math.cos(menuAngle) * 62, 44, orbitTarget.z + Math.sin(menuAngle) * 62);
     cam.lookAt(orbitTarget);
     renderer.focusTarget.copy(orbitTarget);

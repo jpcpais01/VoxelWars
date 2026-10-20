@@ -18,6 +18,7 @@ export class HUD {
   private msgEl = $('messages');
   private cross = $('crosshair');
   private crossRing = $('cross-ring');
+  private scopeEl = $('scope');
   private hitEl = $('hitmarker');
   private dmgEl = $('dmgdirs');
   private respawnEl = $('respawn');
@@ -109,8 +110,11 @@ export class HUD {
   hurt(dir: THREE.Vector3, amount: number) {
     const el = document.createElement('div');
     el.className = 'dmg';
-    // dir points from attacker to us; indicator shows where it came from
-    const ang = Math.atan2(-dir.x, dir.z);
+    // dir points from attacker to us; the indicator shows where it came from, relative to the view
+    const yaw = this.game.pc.yaw;
+    const fx = Math.sin(yaw), fz = Math.cos(yaw);
+    const ax = -dir.x, az = -dir.z;
+    const ang = Math.atan2(ax * -fz + az * fx, ax * fx + az * fz);
     el.style.transform = `rotate(${ang}rad)`;
     el.style.opacity = String(Math.min(1, 0.4 + amount / 40));
     this.dmgEl.appendChild(el);
@@ -180,19 +184,25 @@ export class HUD {
     spin.style.opacity = w.stats.spinUp > 0 ? '1' : '0';
     if (w.stats.spinUp > 0) (spin.firstElementChild as HTMLElement).style.width = `${w.spin * 100}%`;
 
-    // crosshair
-    if (!touch && p.alive) {
+    // crosshair: centred, opens with the current spread; hidden while looking down the sights
+    const vm = g.viewmodel;
+    const ads = vm.adsAmount;
+    if (p.alive && ads < 0.6) {
       this.cross.style.display = 'block';
-      this.cross.style.transform = `translate(${mouseX}px, ${mouseY}px)`;
+      this.cross.style.transform = `translate(${window.innerWidth / 2}px, ${window.innerHeight / 2}px)`;
+      this.cross.style.opacity = String(1 - ads / 0.6);
       const cam = g.renderer.camera;
-      const camDist = cam.position.distanceTo(g.pc.focus);
-      const worldH = 2 * camDist * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2));
-      const aimDist = Math.hypot(g.pc.aimPoint.x - p.pos.x, g.pc.aimPoint.z - p.pos.z);
-      const r = Math.max(5, (p.spread() * aimDist * window.innerHeight) / worldH);
+      const r = Math.max(4, (Math.tan(p.spread()) / Math.tan(THREE.MathUtils.degToRad(cam.fov / 2))) * (window.innerHeight / 2));
       this.crossRing.style.width = this.crossRing.style.height = `${r * 2}px`;
       this.cross.classList.toggle('enemy', !!g.pc.aimTarget && g.pc.aimTarget.team !== p.team);
       this.cross.classList.toggle('reload', w.reloading);
+      this.cross.classList.toggle('sprint', p.sprinting);
     } else this.cross.style.display = 'none';
+    // scope overlay for high-power optics
+    const scoped = p.alive && vm.scopedIn;
+    this.scopeEl.className = scoped ? `on ${p.weapon.build.optic ?? ''}` : '';
+    void mouseX;
+    void mouseY;
 
     // respawn
     if (!p.alive && !g.over) {
@@ -238,8 +248,15 @@ export class HUD {
   }
 
   private project(x: number, y: number, z: number) {
-    const v = this.v.set(x, y, z).project(this.game.renderer.camera);
-    return { x: (v.x * 0.5 + 0.5) * window.innerWidth, y: (-v.y * 0.5 + 0.5) * window.innerHeight, on: v.z < 1 && Math.abs(v.x) < 1.1 && Math.abs(v.y) < 1.1 };
+    const cam = this.game.renderer.camera;
+    const behind = this.v.set(x, y, z).applyMatrix4(cam.matrixWorldInverse).z > 0;
+    const v = this.v.set(x, y, z).project(cam);
+    if (behind) {
+      // mirror points behind the camera so edge markers point the right way
+      v.x = -v.x * 1e3;
+      v.y = -Math.abs(v.y) * 1e3 - 1e3;
+    }
+    return { x: (v.x * 0.5 + 0.5) * window.innerWidth, y: (-v.y * 0.5 + 0.5) * window.innerHeight, on: !behind && v.z < 1 && Math.abs(v.x) < 1.1 && Math.abs(v.y) < 1.1 };
   }
 
   private drawOverlay() {
@@ -326,19 +343,18 @@ export class HUD {
         ctx.font = '600 11px "Chakra Petch", system-ui, sans-serif';
       }
     }
-    // laser sight line
-    if (p.alive && p.weapon.stats.laser) {
-      const a = this.project(p.muzzle.x, p.muzzle.y, p.muzzle.z);
+    // laser dot where the crosshair lands (hip fire only)
+    if (p.alive && p.weapon.stats.laser && g.viewmodel.adsAmount < 0.5) {
       const b = this.project(g.pc.aimPoint.x, g.pc.aimPoint.y, g.pc.aimPoint.z);
-      const grad = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
-      grad.addColorStop(0, 'rgba(255,40,40,0.55)');
-      grad.addColorStop(1, 'rgba(255,40,40,0.05)');
-      ctx.strokeStyle = grad;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(a.x, a.y);
-      ctx.lineTo(b.x, b.y);
-      ctx.stroke();
+      if (b.on) {
+        ctx.fillStyle = 'rgba(255,40,30,0.9)';
+        ctx.shadowColor = '#ff2a1a';
+        ctx.shadowBlur = 8;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      }
     }
     // damage numbers
     for (let i = this.nums.length - 1; i >= 0; i--) {
@@ -369,7 +385,7 @@ export class HUD {
     // touch sticks
     const inp = g.input;
     if (inp.touch) {
-      for (const s of [inp.move, inp.look]) {
+      for (const s of [inp.move]) {
         if (!s.active) continue;
         ctx.strokeStyle = 'rgba(255,255,255,0.35)';
         ctx.lineWidth = 2;
@@ -441,12 +457,25 @@ export class HUD {
     ctx.drawImage(this.mapImg, 0, 0, S, S);
     ctx.globalAlpha = 1;
     const sx = S / MAP_W, sz = S / MAP_D;
-    // view footprint
-    const f = g.pc.focus;
-    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-    ctx.lineWidth = 1;
-    const vw = 26 * g.pc.zoom, vh = 17 * g.pc.zoom;
-    ctx.strokeRect((f.x - vw) * sx, (f.z - vh) * sz, vw * 2 * sx, vh * 2 * sz);
+    // view cone
+    {
+      const yaw = g.pc.yaw;
+      const half = THREE.MathUtils.degToRad(g.renderer.camera.fov / 2) * g.renderer.camera.aspect;
+      const R = 30;
+      const cx = p.pos.x * sx, cz = p.pos.z * sz;
+      const grd = ctx.createRadialGradient(cx, cz, 0, cx, cz, R * sx);
+      grd.addColorStop(0, 'rgba(255,246,192,0.35)');
+      grd.addColorStop(1, 'rgba(255,246,192,0)');
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.moveTo(cx, cz);
+      for (let i = 0; i <= 8; i++) {
+        const a = yaw - half + (i / 8) * half * 2;
+        ctx.lineTo(cx + Math.sin(a) * R * sx, cz + Math.cos(a) * R * sz);
+      }
+      ctx.closePath();
+      ctx.fill();
+    }
     // cores
     for (const c of g.cores) {
       ctx.fillStyle = c.team === 0 ? '#4d95ff' : '#ff5a48';
