@@ -25,6 +25,9 @@
         <div id="timer">15:00</div>
         <div class="team red"><div class="core" id="core-red"><div class="fill"></div><span class="num">100%</span></div><span class="alive" id="alive-red">5</span></div>
       </div>
+      <div id="my-score">0 pts</div>
+      <div id="streak"></div>
+      <div id="score-feed"></div>
       <div id="feed"></div>
       <div id="messages"></div>
       <div id="vitals">
@@ -63,22 +66,31 @@
       <div class="logo"><span class="v">VOXEL</span><span class="w">WARS</span></div>
       <div class="bar"><i id="load-fill"></i></div>
       <div id="load-label">Preparing</div>
+      <div id="load-tip"></div>
     </div>
 
     <div id="menu" class="screen hidden">
       <div class="menu-left">
         <div class="logo"><span class="v">VOXEL</span><span class="w">WARS</span></div>
         <div class="tagline">Pinewater Valley · 5v5 · Destroy the enemy core</div>
-        <div class="menu-buttons">
-          <button class="btn primary" id="btn-deploy">Deploy</button>
+        <button class="btn primary deploy" id="btn-deploy"><span>Deploy</span><small id="deploy-sub"></small></button>
+        <div class="mcard setup">
+          <div class="setup-row"><label>Difficulty</label><div class="seg" id="set-diff"><button data-v="recruit">Recruit</button><button data-v="regular">Regular</button><button data-v="veteran">Veteran</button></div></div>
+          <div class="setup-row"><label>Time of day</label><div class="seg" id="set-tod"><button data-v="morning">Morning</button><button data-v="golden">Golden hour</button><button data-v="overcast">Overcast</button></div></div>
+          <div class="setup-row"><label>Match length</label><div class="seg" id="set-len"><button data-v="10">10 min</button><button data-v="15">15 min</button><button data-v="20">20 min</button></div></div>
+        </div>
+        <div class="menu-grid">
           <button class="btn" id="btn-loadout">Loadout</button>
           <button class="btn" id="btn-settings">Settings</button>
           <button class="btn" id="btn-patch">Patch notes</button>
           <button class="btn" id="btn-help">How to play</button>
         </div>
-        <div class="menu-kit" id="menu-kit"></div>
       </div>
-      <div class="menu-foot">v0.1 · Built for speed: dynamic resolution keeps it smooth on phones and laptops</div>
+      <div class="menu-right">
+        <div class="mcard"><h4>Your kit</h4><div class="menu-kit" id="menu-kit"></div></div>
+        <div class="mcard"><h4>Service record</h4><div class="career" id="career"></div></div>
+      </div>
+      <div class="menu-foot">v0.2 · Built for speed: off-thread meshing and dynamic resolution keep it smooth on phones and laptops</div>
     </div>
 
     <div id="loadout" class="panel-screen">
@@ -115,6 +127,7 @@
           <div><h3>Keyboard &amp; mouse</h3><p><kbd>WASD</kbd> move · <kbd>Mouse</kbd> aim · <kbd>LMB</kbd> fire · <kbd>RMB</kbd> aim down sights (looks further ahead) · <kbd>Shift</kbd> sprint · <kbd>Space</kbd> jump · <kbd>R</kbd> reload · <kbd>1</kbd>/<kbd>2</kbd>/<kbd>Q</kbd>/wheel swap · <kbd>G</kbd> equipment · <kbd>Tab</kbd> scores · <kbd>Esc</kbd> pause · <kbd>+</kbd>/<kbd>-</kbd> zoom</p></div>
           <div><h3>Touch</h3><p>Left thumb moves. Right thumb aims; push it past the ring to fire. Aim assist gently locks onto enemies you can see. Buttons handle aiming, reload, swap, equipment and jump.</p></div>
           <div><h3>Destruction</h3><p>Nearly everything breaks. Cut a trunk and the tree falls (on whoever is under it). Knock out the base of a wall and the roof comes down. Red fuel barrels chain-react. Craters near the river flood.</p></div>
+          <div><h3>Scoring</h3><p>Eliminations 100, headshots +50, assists 40, multi-kills and streaks pay bonuses, ending an enemy streak pays 50, and every point of core damage is worth half a point. The match MVP is whoever scores most.</p></div>
           <div><h3>Tips</h3><p>Canopies hide you from above, and bushes block sight lines. Suppressors keep you off the enemy minimap. Rockets and demo charges open new paths into bunkers. Refill ammo at your base's supply depot.</p></div>
         </div>
       </div>
@@ -133,12 +146,18 @@
     </div>
 
     <div id="end" class="panel-screen">
-      <div class="panel wide">
+      <div class="panel wide end-panel">
         <div id="end-banner"></div>
+        <div id="end-top">
+          <div id="end-me"></div>
+          <div id="end-mvp"></div>
+        </div>
+        <div id="end-awards"></div>
         <div id="end-stats"></div>
         <div class="menu-buttons row">
           <button class="btn primary" id="e-again">Play again</button>
           <button class="btn" id="e-loadout">Loadout</button>
+          <button class="btn ghost" id="e-menu">Main menu</button>
         </div>
       </div>
     </div>

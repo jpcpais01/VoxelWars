@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { Build, WeaponDef } from './weapons';
+import { GLSL_CLOUDS, GLSL_COMMON, GLSL_SKY, shared } from '../render/shaderlib';
 
 type Part = [w: number, h: number, d: number, x: number, y: number, z: number, color: number, rx?: number];
 
@@ -32,7 +33,47 @@ export function boxes(parts: Part[]): THREE.BufferGeometry {
   return merged;
 }
 
+/**
+ * Vertex-coloured Lambert for soldiers, guns and props in the world: picks up the baked sky
+ * visibility (darker under canopies and roofs) and a soft rim light so figures read clearly
+ * against the ground from the high camera.
+ */
 export const toyMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+toyMaterial.onBeforeCompile = (shader) => {
+  Object.assign(shader.uniforms, shared);
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', `#include <common>\nvarying vec3 vToyP;\nvarying vec3 vToyN;`)
+    .replace(
+      '#include <worldpos_vertex>',
+      `#include <worldpos_vertex>
+vToyP = (modelMatrix * vec4(transformed, 1.0)).xyz;
+vToyN = normalize(mat3(modelMatrix) * objectNormal);`,
+    );
+  shader.fragmentShader = shader.fragmentShader
+    .replace(
+      '#include <common>',
+      `#include <common>
+${GLSL_COMMON}
+${GLSL_CLOUDS}
+${GLSL_SKY}
+uniform float uTime;
+varying vec3 vToyP;
+varying vec3 vToyN;`,
+    )
+    .replace(
+      '#include <aomap_fragment>',
+      `#include <aomap_fragment>
+float sky = skyVis(vToyP, vToyN);
+reflectedLight.indirectDiffuse *= sky;
+reflectedLight.directDiffuse *= cloudShadow(vToyP.xz, uTime);
+float rim = pow(1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0), 3.0);
+totalEmissiveRadiance += (diffuseColor.rgb * 0.5 + vec3(0.1, 0.12, 0.14)) * rim * (0.35 + 0.4 * sky);`,
+    );
+};
+toyMaterial.customProgramCacheKey = () => 'toy';
+
+/** Plain variant for UI previews that live outside the world (no sky volume there). */
+export const previewMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
 
 /** Gun mesh in metres, barrel along +Z, origin at the grip. Attachments are visible. */
 export function buildGunGeometry(def: WeaponDef, build: Build): THREE.BufferGeometry {

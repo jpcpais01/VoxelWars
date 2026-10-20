@@ -22,7 +22,9 @@ const linearColor = (m: number, out = new THREE.Color()) => {
 };
 
 class FallingBody {
-  mesh: THREE.Mesh;
+  /** rotates about the pivot; the voxel mesh inside it is offset to the body's local origin */
+  mesh = new THREE.Group();
+  voxMesh: THREE.Mesh;
   local: Float32Array; // voxel centre positions relative to pivot (metres)
   mats: Uint8Array;
   samples: number[] = [];
@@ -79,16 +81,20 @@ class FallingBody {
     }
     // remove from the world
     for (let i = 0; i < n; i++) world.set(coords[i * 3], coords[i * 3 + 1], coords[i * 3 + 2], 0);
-    const md = greedyMesh(vol, PX, PY, PZ, minX, minY, minZ, this.pivot.x, this.pivot.y, this.pivot.z);
+    const md = greedyMesh(vol, PX, PY, PZ);
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(md.positions, 3));
-    geo.setAttribute('normal', new THREE.BufferAttribute(md.normals, 3, true));
+    geo.setAttribute('position', new THREE.BufferAttribute(md.positions, 4, false));
     geo.setAttribute('aData', new THREE.BufferAttribute(md.data, 4, false));
     geo.setIndex(new THREE.BufferAttribute(md.indices, 1));
-    geo.computeBoundingSphere();
-    this.mesh = new THREE.Mesh(geo, createVoxelMaterial({ offset: this.pivot.clone() }));
-    this.mesh.castShadow = true;
-    this.mesh.receiveShadow = true;
+    geo.boundingBox = new THREE.Box3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(sx, sy, sz));
+    geo.boundingSphere = geo.boundingBox.getBoundingSphere(new THREE.Sphere());
+    const origin = new THREE.Vector3(minX * VOXEL, minY * VOXEL, minZ * VOXEL);
+    this.voxMesh = new THREE.Mesh(geo, createVoxelMaterial({ offset: origin.clone() }));
+    this.voxMesh.castShadow = true;
+    this.voxMesh.receiveShadow = true;
+    this.voxMesh.scale.setScalar(VOXEL);
+    this.voxMesh.position.copy(origin).sub(this.pivot);
+    this.mesh.add(this.voxMesh);
     this.mesh.position.copy(this.pivot);
     scene.add(this.mesh);
     this.pos.copy(this.pivot);
@@ -365,6 +371,16 @@ export class Destruction {
         }
         continue;
       }
+      // the packed vertex format holds coordinates up to 255 voxels; anything longer stays put
+      let lo = 1e9, hi = -1, lo2 = 1e9, hi2 = -1;
+      for (const i of list) {
+        const t = (i / WY) | 0, z = t % WZ, x = (t / WZ) | 0;
+        if (x < lo) lo = x;
+        if (x > hi) hi = x;
+        if (z < lo2) lo2 = z;
+        if (z > hi2) hi2 = z;
+      }
+      if (hi - lo > 250 || hi2 - lo2 > 250) continue;
       const body = new FallingBody(list, w, this.scene, this.lastDir);
       this.bodies.push(body);
       this.ev.onTopple(body.pivot.x, body.pivot.y, body.pivot.z, body.isTree);
@@ -401,8 +417,8 @@ export class Destruction {
       }
     }
     this.scene.remove(b.mesh);
-    b.mesh.geometry.dispose();
-    (b.mesh.material as THREE.Material).dispose();
+    b.voxMesh.geometry.dispose();
+    (b.voxMesh.material as THREE.Material).dispose();
     const cx = sx / n, cy = sy / n, cz = sz / n;
     for (let i = 0; i < 10; i++) this.particles.dust(cx + (Math.random() - 0.5) * (maxX - minX), cy, cz + (Math.random() - 0.5) * (maxZ - minZ), 0.55, 0.5, 0.42, 2, 2);
     this.ev.onBodyImpact(cx, cy, cz, n, minX, minZ, maxX, maxZ, b.isTree);

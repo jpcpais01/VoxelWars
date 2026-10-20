@@ -66,6 +66,7 @@ export class Water {
     uRipples: { value: [] as THREE.Vector4[] },
     uSSR: { value: 1 },
     uHalfRes: { value: new THREE.Vector2(1, 1) },
+    tFlow: { value: null as THREE.Texture | null },
   };
 
   constructor(private world: World) {
@@ -94,6 +95,16 @@ export class Water {
     const base = (x * WZ + z) * WY;
     for (let y = lim; y >= 0; y--) if (this.world.vox[base + y] !== 0) return y + 1;
     return 0;
+  }
+
+  /** Flow field from the generator: the river current and the lake swirl advect the waves. */
+  setFlow(flow: Uint8Array) {
+    const t = new THREE.DataTexture(flow, WZ >> 1, WX >> 1, THREE.RGFormat, THREE.UnsignedByteType);
+    t.magFilter = THREE.LinearFilter;
+    t.minFilter = THREE.LinearFilter;
+    t.unpackAlignment = 1;
+    t.needsUpdate = true;
+    this.uniforms.tFlow.value = t;
   }
 
   refreshAll() {
@@ -140,6 +151,7 @@ uniform vec2 uHalfRes;
 uniform sampler2D tRefract;
 uniform sampler2D tWaves;
 uniform sampler2D tBed;
+uniform sampler2D tFlow;
 uniform mat4 uProj;
 uniform vec3 uSunDir;
 uniform vec3 uSunCol;
@@ -160,14 +172,25 @@ uniform float uSSR;`,
   float bedY = texture2D(tBed, vec2(mapUV.x, mapUV.y)).r * 255.0 / 16.0 * VOX;
   float vdepth = max(${WATER_Y.toFixed(3)} - bedY, 0.0);
 
-  // flowing normals: two scrolling layers + a slow broad swell
-  vec2 flow = vec2(0.55, 0.08);
+  // flow-mapped normals: two layers advected along the current, cross-faded so they never smear
+  vec2 fl = texture2D(tFlow, mapUV).rg * 2.0 - 1.0;
+  float spd = length(fl);
   vec2 p = vWorldP.xz;
-  vec3 n1 = texture2D(tWaves, p * 0.045 + flow * uTime * 0.05).xyz;
-  vec3 n2 = texture2D(tWaves, p * 0.09 * mat2(0.8, -0.6, 0.6, 0.8) - flow.yx * uTime * 0.07).xyz;
+  float cyc = uTime * 0.2;
+  float ph0 = fract(cyc), ph1 = fract(cyc + 0.5);
+  float wf = abs(ph0 * 2.0 - 1.0);
+  mat2 rot = mat2(0.8, -0.6, 0.6, 0.8);
+  vec3 n1 = mix(texture2D(tWaves, (p - fl * ph0 * 4.0) * 0.05).xyz, texture2D(tWaves, (p - fl * ph1 * 4.0) * 0.05 + 0.37).xyz, wf);
+  vec3 n2 = mix(texture2D(tWaves, rot * (p - fl * ph0 * 5.0) * 0.11).xyz, texture2D(tWaves, rot * (p - fl * ph1 * 5.0) * 0.11 + 0.61).xyz, wf);
   vec3 n3 = texture2D(tWaves, p * 0.012 + vec2(uTime * 0.006, -uTime * 0.004)).xyz;
-  vec2 d = (n1.xy - 0.5) * 1.0 + (n2.xy - 0.5) * 0.7 + (n3.xy - 0.5) * 0.6;
+  float chop = 0.75 + spd * 0.7;
+  vec2 d = ((n1.xy - 0.5) * 1.0 + (n2.xy - 0.5) * 0.75) * chop + (n3.xy - 0.5) * 0.6;
   float hgt = n1.z * 0.5 + n2.z * 0.35 + n3.z * 0.15;
+  // streaks of foam stretched along fast current (static frame, so plain scrolling is fine)
+  vec2 fdir = spd > 0.01 ? fl / spd : vec2(1.0, 0.0);
+  vec2 sq = vec2(dot(p, fdir), dot(p, vec2(-fdir.y, fdir.x)));
+  float streakN = texture2D(tWaves, vec2(sq.x * 0.05 - uTime * 0.09 * spd, sq.y * 0.42)).z;
+  float streak = smoothstep(0.66, 0.9, streakN) * smoothstep(0.3, 0.95, spd);
   // ripples (impacts, wading)
   for (int i = 0; i < 16; i++) {
     vec4 r = uRipples[i];
@@ -233,7 +256,8 @@ uniform float uSSR;`,
   float foamN = texture2D(tWaves, p * 0.32 + vec2(uTime * 0.03, 0.0)).z;
   float foam = (1.0 - smoothstep(0.0, 0.32, edgeD)) * smoothstep(0.35, 0.65, foamN + 0.25 * (1.0 - edgeD * 3.0));
   float foamLine = (1.0 - smoothstep(0.02, 0.08, abs(edgeD - 0.14 - 0.04 * sin(uTime * 1.3 + p.x * 0.7 + p.y * 0.5)))) * 0.5;
-  col = mix(col, vec3(0.92, 0.96, 0.95) * (0.6 + 0.4 * shadow), clamp(foam * 0.75 + foamLine * smoothstep(0.0, 0.5, vdepth) * 0.5, 0.0, 0.85));
+  float rapids = streak * (0.28 + 0.5 * (1.0 - smoothstep(0.25, 1.2, vdepth)));
+  col = mix(col, vec3(0.92, 0.96, 0.95) * (0.6 + 0.4 * shadow), clamp(foam * 0.75 + foamLine * smoothstep(0.0, 0.5, vdepth) * 0.5 + rapids, 0.0, 0.85));
 
   gl_FragColor = vec4(col, 1.0);
 }

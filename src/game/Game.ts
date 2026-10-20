@@ -65,7 +65,19 @@ export interface GameEvents {
   onPlayerHurt(dir: THREE.Vector3, amount: number): void;
   onMessage(text: string, kind: 'info' | 'warn' | 'good'): void;
   onEnd(winner: Team): void;
+  /** points the player just earned */
+  onScore(label: string, points: number, big?: boolean): void;
+  /** damage the player dealt, at a world position */
+  onDamage(x: number, y: number, z: number, amount: number, head: boolean, killed: boolean): void;
 }
+
+export type Difficulty = 'recruit' | 'regular' | 'veteran';
+export interface MatchOptions {
+  difficulty: Difficulty;
+  minutes: number;
+}
+/** bot skill shift per difficulty (base skills sit around 0.62..0.92) */
+const DIFF_SKILL: Record<Difficulty, number> = { recruit: -0.24, regular: 0, veteran: 0.2 };
 
 const BOT_NAMES = ['Viper', 'Maple', 'Kodiak', 'Juno', 'Rook', 'Sable', 'Fennec', 'Nova', 'Bishop', 'Wren', 'Atlas', 'Moss', 'Echo', 'Pike', 'Tundra', 'Quill', 'Hawk', 'Birch'];
 
@@ -160,7 +172,13 @@ export class Game {
   }
 
   // --------------------------------------------------------------------------------- setup
-  start(playerName: string, loadout: Loadout) {
+  options: MatchOptions = { difficulty: 'regular', minutes: 15 };
+  private coreScoreAcc = 0;
+  private coreScoreT = 0;
+
+  start(playerName: string, loadout: Loadout, options?: MatchOptions) {
+    if (options) this.options = options;
+    this.timeLeft = this.options.minutes * 60;
     const scene = this.renderer.scene;
     const names = [...BOT_NAMES].sort(() => this.rng() - 0.5);
     this.player = new Soldier(playerName, TEAM_BLUE, true, loadout);
@@ -171,6 +189,7 @@ export class Game {
       const lo = randomLoadout(this.rng, prefs[i]);
       const s = new Soldier(names[i], team, false, lo);
       const b = new Bot(s, this, i * 13 + 5);
+      b.skill = Math.min(1, Math.max(0.3, b.skill + DIFF_SKILL[this.options.difficulty]));
       this.soldiers.push(s);
       this.bots.push(b);
     }
@@ -267,6 +286,7 @@ export class Game {
     }
     if (s.isPlayer) this.renderer.shake = Math.min(0.5, this.renderer.shake + st.recoil * (def.model.bulky ? 3 : 2));
     const spread = s.spread();
+    s.pelletsFired += st.pellets;
     for (let i = 0; i < st.pellets; i++) {
       tmpD.copy(s.aimDir);
       // gaussian-ish cone
@@ -460,10 +480,11 @@ export class Game {
         if (st.explosive > 0) {
           this.explode(p.pos.x + dir.x * sh.t, p.pos.y + dir.y * sh.t, p.pos.z + dir.z * sh.t, st.explosive, st.blastDamage, st.voxRadius, p.owner, p.weaponName);
         }
-        const killed = this.damageSoldier(sh.s, dmg, p.owner, dir, p.weaponName, sh.headshot);
+        const hp = new THREE.Vector3(p.pos.x + dir.x * sh.t, p.pos.y + dir.y * sh.t, p.pos.z + dir.z * sh.t);
+        if (sh.s.alive && sh.s.team !== p.owner.team) p.owner.pelletsHit++;
+        const killed = this.damageSoldier(sh.s, dmg, p.owner, dir, p.weaponName, sh.headshot, hp);
         if (st.tracer) sh.s.markedUntil = this.time + 5;
         if (p.owner.isPlayer) this.ev.onHitMarker(killed, sh.headshot);
-        const hp = tmpV.set(p.pos.x + dir.x * sh.t, p.pos.y + dir.y * sh.t, p.pos.z + dir.z * sh.t);
         this.audio.flesh(hp);
         const tc = sh.s.team === 0 ? [0.3, 0.55, 1.4] : [1.4, 0.35, 0.25];
         for (let i = 0; i < 3; i++) this.particles.add.spawn({ x: hp.x, y: hp.y, z: hp.z, vx: dir.x * 3 + (Math.random() - 0.5) * 3, vy: Math.random() * 3, vz: dir.z * 3 + (Math.random() - 0.5) * 3, size: 0.07, life: 0.25, r: tc[0] * 3, g: tc[1] * 3, b: tc[2] * 3, gravity: 9, stretch: 0.02 });
@@ -622,7 +643,10 @@ export class Game {
   explode(x: number, y: number, z: number, radius: number, damage: number, voxR: number, owner: Soldier | null, weapon: string) {
     const pos = new THREE.Vector3(x, y, z);
     const big = radius > 2;
-    if (voxR > 0) this.destruction.carve(x, y, z, voxR, big ? 110 : 20);
+    if (voxR > 0) {
+      const n = this.destruction.carve(x, y, z, voxR, big ? 110 : 20);
+      if (owner) owner.voxelsDestroyed += n;
+    }
     // soldiers
     for (const s of this.soldiers) {
       if (!s.alive) continue;
@@ -677,11 +701,20 @@ export class Game {
     this.audio.impact(pt, kind);
   }
 
-  damageSoldier(s: Soldier, dmg: number, from: Soldier | null, dir: THREE.Vector3, weapon = '', head = false): boolean {
+  damageSoldier(s: Soldier, dmg: number, from: Soldier | null, dir: THREE.Vector3, weapon = '', head = false, at?: THREE.Vector3): boolean {
     if (!s.alive) return false;
     if (from && from !== s && from.team === s.team) return false;
+    const hpBefore = s.hp;
     const killed = s.hurt(dmg, from, dir, this.time);
-    if (from && from !== s) from.damageDealt += dmg;
+    const dealt = Math.min(hpBefore, dmg);
+    if (from && from !== s) {
+      from.damageDealt += dealt;
+      s.damagers.set(from, this.time);
+      if (from.isPlayer && dealt > 0) {
+        const p = at ?? tmpV.set(s.pos.x, s.pos.y + 1.4, s.pos.z);
+        this.ev.onDamage(p.x, p.y, p.z, dealt, head, killed);
+      }
+    }
     if (s.isPlayer && dmg > 0) {
       this.ev.onPlayerHurt(dir, dmg);
       this.renderer.hurt = Math.min(1, this.renderer.hurt + dmg / 60);
@@ -694,21 +727,65 @@ export class Game {
     }
     if (killed) {
       s.respawnAt = this.time + RESPAWN_TIME;
-      if (from && from !== s) from.kills++;
+      if (from && from !== s) this.creditKill(from, s, head);
+      // everyone else who hurt the victim recently gets an assist
+      for (const [att, t] of s.damagers) {
+        if (att === from || att.team === s.team || this.time - t > 10) continue;
+        att.assists++;
+        att.score += 40;
+        if (att.isPlayer) this.ev.onScore('Assist', 40);
+      }
+      s.damagers.clear();
+      s.streak = 0;
+      s.multi = 0;
       const e: FeedEntry = { t: this.time, killer: from ? from.name : weapon || 'World', killerTeam: from ? from.team : ((1 - s.team) as Team), victim: s.name, victimTeam: s.team, weapon: from ? weapon : '', special: head ? 'headshot' : undefined };
       if (from === s) e.killer = s.name;
       this.feed.push(e);
       this.ev.onKill(e);
-      for (const c4 of s.c4) void c4;
       if (s.isPlayer) this.pc.spectate = from && from !== s ? from : null;
     }
     return killed;
   }
 
+  private creditKill(k: Soldier, victim: Soldier, head: boolean) {
+    k.kills++;
+    k.streak++;
+    k.bestStreak = Math.max(k.bestStreak, k.streak);
+    k.multi = this.time - k.lastKillT < 4.5 ? k.multi + 1 : 1;
+    k.lastKillT = this.time;
+    let pts = 100;
+    if (head) {
+      k.headshots++;
+      pts += 50;
+    }
+    k.score += pts;
+    if (!k.isPlayer) return;
+    this.ev.onScore(head ? `Headshot · ${victim.name}` : `Eliminated ${victim.name}`, pts);
+    if (victim.streak >= 3) {
+      k.score += 50;
+      this.ev.onScore('Ended a streak', 50);
+    }
+    const multi = ['', '', 'Double kill', 'Triple kill', 'Quad kill'][Math.min(k.multi, 4)];
+    if (k.multi >= 2) {
+      const b = 50 * (k.multi - 1);
+      k.score += b;
+      this.ev.onScore(k.multi > 4 ? 'Rampage' : multi, b, true);
+    }
+    const streakName: Record<number, string> = { 5: 'Killing spree', 8: 'Rampaging', 12: 'Unstoppable', 16: 'Legendary' };
+    if (streakName[k.streak]) {
+      k.score += 100;
+      this.ev.onScore(`${streakName[k.streak]} · ${k.streak} in a row`, 100, true);
+    }
+  }
+
   damageCore(c: Core, dmg: number, from: Soldier | null, at: THREE.Vector3) {
     if (!c.alive || this.over) return;
     if (from && from.team === c.team) return;
-    if (from) from.coreDamage += dmg;
+    if (from) {
+      from.coreDamage += dmg;
+      from.score += dmg * 0.5;
+      if (from.isPlayer) this.coreScoreAcc += dmg * 0.5;
+    }
     const destroyed = c.hit(dmg, this.time, from ? from.pos.x : at.x, from ? from.pos.z : at.z);
     if (c.team === TEAM_BLUE && this.time - this.alertT[0] > 8) {
       this.alertT[0] = this.time;
@@ -820,9 +897,10 @@ export class Game {
     if (cols.length) {
       this.nav.updateColumns(cols);
       this.renderer.water?.refreshColumns(cols);
+      this.chunks.markSky(cols);
       this.minimapDirty = true;
     }
-    this.chunks.update(5);
+    this.chunks.update(dt);
     this.particles.update(dt);
     this.debris.update(dt);
     for (const c of this.cores) c.update(dt, this.time);
@@ -860,6 +938,13 @@ export class Game {
       }
     }
     this.noises = this.noises.filter((n) => this.time - n.t < 1);
+    // core damage points arrive as one tally rather than a toast per bullet
+    this.coreScoreT -= dt;
+    if (this.coreScoreT <= 0 && this.coreScoreAcc >= 5) {
+      this.ev.onScore('Core damage', Math.round(this.coreScoreAcc));
+      this.coreScoreAcc = 0;
+      this.coreScoreT = 0.8;
+    }
     this.input.endFrame();
   }
 
@@ -901,6 +986,8 @@ export class Game {
     const aimFar = Math.hypot(ap.x - p.pos.x, ap.z - p.pos.z) > 4;
     shared.uCutB.value.set(av.x * 0.5 + 0.5, av.y * 0.5 + 0.5, aimZ, aimFar ? rad * 0.75 : 0);
     shared.uCutH.value.y = ap.y + 1.2;
+    // tall things between the camera (which sits toward +z) and the focus project onto it
+    this.chunks.updateCutout(p.pos.x, p.pos.z + 2.5, 9, ap.x, ap.z + 2.5, aimFar ? 7 : 0);
     this.renderer.focusTarget.copy(this.pc.focus);
     this.renderer.updateShadowCamera(this.pc.focus);
     this.renderer.hurt = Math.max(0, this.renderer.hurt - dt * 0.8);

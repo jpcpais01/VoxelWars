@@ -28,6 +28,11 @@ export class HUD {
   private fpsN = 0;
   showFps = false;
   private lastHp = 100;
+  private scoreFeed = $('score-feed');
+  private streakEl = $('streak');
+  private myScoreEl = $('my-score');
+  private shownScore = 0;
+  private nums: { x: number; y: number; z: number; v: number; t: number; head: boolean; kill: boolean; jx: number }[] = [];
 
   constructor(private game: Game) {
     this.mapImg.width = WX / 2;
@@ -59,7 +64,6 @@ export class HUD {
     while (this.feedEl.children.length > 6) this.feedEl.lastElementChild?.remove();
     setTimeout(() => row.classList.add('fade'), 6000);
     setTimeout(() => row.remove(), 7000);
-    if (e.killer === p.name && e.victim !== p.name) this.message(e.special === 'headshot' ? `Headshot · ${e.victim}` : `Eliminated ${e.victim}`, 'good');
   }
 
   hitmarker(kill: boolean, head: boolean) {
@@ -68,6 +72,38 @@ export class HUD {
     this.game.audio.hitmarker(kill);
     clearTimeout((this.hitEl as unknown as { _t: number })._t);
     (this.hitEl as unknown as { _t: number })._t = window.setTimeout(() => (this.hitEl.className = ''), kill ? 380 : 160);
+  }
+
+  /** "+100 Elimination" style toasts; big ones also get the centre banner */
+  score(label: string, pts: number, big = false) {
+    const el = document.createElement('div');
+    el.className = `sc ${big ? 'big' : ''}`;
+    el.innerHTML = `<b>+${pts}</b><span>${esc(label)}</span>`;
+    this.scoreFeed.prepend(el);
+    while (this.scoreFeed.children.length > 4) this.scoreFeed.lastElementChild?.remove();
+    setTimeout(() => el.classList.add('fade'), 1900);
+    setTimeout(() => el.remove(), 2400);
+    if (big) {
+      this.streakEl.textContent = label;
+      this.streakEl.className = '';
+      void this.streakEl.offsetWidth;
+      this.streakEl.className = 'show';
+      this.game.audio.hitmarker(true);
+    }
+  }
+
+  /** floating damage numbers for hits the player lands */
+  damage(x: number, y: number, z: number, v: number, head: boolean, kill: boolean) {
+    // merge rapid hits on the same spot (shotgun pellets, bursts) into one rising number
+    const last = this.nums[this.nums.length - 1];
+    if (last && this.game.time - last.t < 0.12 && Math.hypot(last.x - x, last.z - z) < 1.2 && !last.kill) {
+      last.v += v;
+      last.head ||= head;
+      last.kill ||= kill;
+      return;
+    }
+    this.nums.push({ x, y, z, v, t: this.game.time, head, kill, jx: (Math.random() - 0.5) * 18 });
+    if (this.nums.length > 24) this.nums.shift();
   }
 
   hurt(dir: THREE.Vector3, amount: number) {
@@ -166,6 +202,13 @@ export class HUD {
       $('respawn-by').textContent = p.lastAttacker && p.lastAttacker !== p ? `Eliminated by ${p.lastAttacker.name} · ${p.lastAttacker.weapon.def.name}` : 'You were eliminated';
     } else this.respawnEl.style.display = 'none';
 
+    // running score (counts up)
+    if (Math.round(this.shownScore) !== Math.round(p.score)) {
+      this.shownScore += (p.score - this.shownScore) * Math.min(1, dt * 8) + Math.sign(p.score - this.shownScore) * 0.5;
+      if (Math.abs(p.score - this.shownScore) < 1) this.shownScore = p.score;
+      this.myScoreEl.textContent = `${Math.round(this.shownScore).toLocaleString()} pts`;
+    }
+
     // scoreboard
     if (g.input.down('Tab')) {
       this.scoreEl.style.display = 'block';
@@ -187,10 +230,11 @@ export class HUD {
     const rows = (team: number) =>
       g.soldiers
         .filter((s) => s.team === team)
-        .sort((a, b) => b.kills - a.kills)
-        .map((s) => `<tr class="${s.isPlayer ? 'me' : ''} ${s.alive ? '' : 'dead'}"><td>${esc(s.name)}</td><td>${s.weapon.def.name}</td><td>${s.kills}</td><td>${s.deaths}</td><td>${Math.round(s.coreDamage)}</td></tr>`)
+        .sort((a, b) => b.score - a.score)
+        .map((s) => `<tr class="${s.isPlayer ? 'me' : ''} ${s.alive ? '' : 'dead'}"><td>${esc(s.name)}</td><td>${s.weapon.def.name}</td><td>${Math.round(s.score)}</td><td>${s.kills}</td><td>${s.assists}</td><td>${s.deaths}</td><td>${Math.round(s.coreDamage)}</td></tr>`)
         .join('');
-    this.scoreEl.innerHTML = `<div class="sb-team blue"><h3>Blue</h3><table><tr><th>Name</th><th>Weapon</th><th>K</th><th>D</th><th>Core dmg</th></tr>${rows(0)}</table></div><div class="sb-team red"><h3>Red</h3><table><tr><th>Name</th><th>Weapon</th><th>K</th><th>D</th><th>Core dmg</th></tr>${rows(1)}</table></div>`;
+    const head = '<tr><th>Name</th><th>Weapon</th><th>Score</th><th>K</th><th>A</th><th>D</th><th>Core</th></tr>';
+    this.scoreEl.innerHTML = `<div class="sb-team blue"><h3>Blue</h3><table>${head}${rows(0)}</table></div><div class="sb-team red"><h3>Red</h3><table>${head}${rows(1)}</table></div>`;
   }
 
   private project(x: number, y: number, z: number) {
@@ -296,6 +340,32 @@ export class HUD {
       ctx.lineTo(b.x, b.y);
       ctx.stroke();
     }
+    // damage numbers
+    for (let i = this.nums.length - 1; i >= 0; i--) {
+      const n = this.nums[i];
+      const age = g.time - n.t;
+      const life = n.kill ? 1.1 : 0.8;
+      if (age > life) {
+        this.nums.splice(i, 1);
+        continue;
+      }
+      const sc = this.project(n.x, n.y + 0.4, n.z);
+      if (!sc.on) continue;
+      const k = age / life;
+      const pop = age < 0.08 ? 1 + (0.08 - age) * 6 : 1;
+      const size = (n.kill ? 19 : n.head ? 16 : 13) * pop;
+      ctx.font = `800 ${size.toFixed(1)}px "Chakra Petch", system-ui, sans-serif`;
+      ctx.globalAlpha = 1 - k * k;
+      const x = sc.x + n.jx * k, y = sc.y - 26 * Math.sqrt(k) - 6;
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(10,14,12,0.75)';
+      ctx.strokeText(String(Math.round(n.v)), x, y);
+      ctx.fillStyle = n.kill ? '#ff6a4d' : n.head ? '#ffd24a' : '#f4f7f2';
+      ctx.fillText(String(Math.round(n.v)), x, y);
+      ctx.globalAlpha = 1;
+    }
+    ctx.font = '600 11px "Chakra Petch", system-ui, sans-serif';
+
     // touch sticks
     const inp = g.input;
     if (inp.touch) {

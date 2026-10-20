@@ -1,15 +1,16 @@
 import './styles.css';
 import * as THREE from 'three';
 import { registerSW } from 'virtual:pwa-register';
-import { TEAM_BLUE, TEAM_NAMES, Team } from './core/config';
-import { Renderer, Quality } from './render/Renderer';
+import { CORE_HP, TEAM_BLUE, TEAM_NAMES, Team } from './core/config';
+import { LIGHTING, LightingId, Renderer, Quality } from './render/Renderer';
 import { Water } from './render/water';
 import { World } from './world/World';
 import { generateWorld } from './world/generator';
 import { ChunkManager } from './world/ChunkManager';
 import { Audio } from './audio/Audio';
 import { Input } from './game/Input';
-import { Game } from './game/Game';
+import { Difficulty, Game } from './game/Game';
+import type { Soldier } from './game/Soldier';
 import { HUD } from './ui/HUD';
 import { LoadoutEditor } from './ui/Loadout';
 import { ITEMS, WEAPON } from './game/weapons';
@@ -27,11 +28,14 @@ interface Settings {
   volume: number;
   zoom: number;
   fps: boolean;
+  difficulty: Difficulty;
+  lighting: LightingId;
+  minutes: number;
 }
 const SETTINGS_KEY = 'voxelwars.settings.v1';
 const coarse = matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
 function loadSettings(): Settings {
-  const def: Settings = { quality: 'auto', volume: 0.8, zoom: 1, fps: false };
+  const def: Settings = { quality: 'auto', volume: 0.8, zoom: 1, fps: false, difficulty: 'regular', lighting: 'morning', minutes: 15 };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) return { ...def, ...JSON.parse(raw) };
@@ -53,6 +57,50 @@ function resolvedQuality(): Quality {
   const small = Math.min(screen.width, screen.height) < 700;
   return coarse || small ? 'medium' : 'high';
 }
+
+// ------------------------------------------------------------------------------------ career
+interface Career {
+  matches: number;
+  wins: number;
+  kills: number;
+  deaths: number;
+  assists: number;
+  bestStreak: number;
+  bestScore: number;
+  coreDamage: number;
+}
+const CAREER_KEY = 'voxelwars.career.v1';
+function loadCareer(): Career {
+  const def: Career = { matches: 0, wins: 0, kills: 0, deaths: 0, assists: 0, bestStreak: 0, bestScore: 0, coreDamage: 0 };
+  try {
+    const raw = localStorage.getItem(CAREER_KEY);
+    if (raw) return { ...def, ...JSON.parse(raw) };
+  } catch {
+    /* ignore */
+  }
+  return def;
+}
+const career = loadCareer();
+function saveCareer() {
+  try {
+    localStorage.setItem(CAREER_KEY, JSON.stringify(career));
+  } catch {
+    /* ignore */
+  }
+}
+
+const TIPS = [
+  'Shoot out the base of a trunk and the whole tree comes down, on whoever is standing under it.',
+  'Rockets and demo charges open new doors into a bunker. Walls are only a suggestion.',
+  'Explosives hit cores far harder than bullets. Bring a launcher when you push.',
+  'Suppressors keep you off the enemy minimap when you fire.',
+  'Bushes and canopies block sight lines. Bots cannot shoot what they cannot see.',
+  'Red fuel barrels chain-react. Lure a squad past the supply depot.',
+  'Your base supply depot refills ammo and equipment.',
+  'Craters next to the river flood. So do the bots who stand in them.',
+  'Golden hour casts long shadows: great for spotting movement across the valley.',
+  'Assists, headshots, multi-kills and core damage all add to your score.',
+];
 
 if (coarse) document.body.classList.add('touch');
 window.addEventListener('touchstart', () => document.body.classList.add('touch'), { passive: true, once: true });
@@ -81,14 +129,30 @@ async function progress(p: number, label: string) {
   await nextFrame();
 }
 
+const tipEl = $('load-tip');
+let tipI = (Math.random() * TIPS.length) | 0;
+tipEl.textContent = TIPS[tipI];
+const tipTimer = window.setInterval(() => {
+  tipEl.style.opacity = '0';
+  setTimeout(() => {
+    tipI = (tipI + 1) % TIPS.length;
+    tipEl.textContent = TIPS[tipI];
+    tipEl.style.opacity = '1';
+  }, 400);
+}, 3200);
+
 async function boot() {
   renderer.setQuality(resolvedQuality());
   const info = await generateWorld(world, 1337, async (p, label) => progress(p * 0.6, label));
   chunks = new ChunkManager(world, info.grassDensity);
   renderer.scene.add(chunks.group);
-  await chunks.buildAll(async (p) => progress(0.6 + p * 0.35, 'Meshing the valley'));
+  await chunks.buildAll(async (p) => progress(0.6 + p * 0.3, 'Meshing the valley'));
+  await progress(0.92, 'Baking sky light');
+  await chunks.buildSky();
   chunks.setGrass(renderer.q.grass);
-  renderer.setWater(new Water(world));
+  const water = new Water(world);
+  water.setFlow(info.flow);
+  renderer.setWater(water);
   await progress(0.97, 'Briefing the squads');
   game = new Game(renderer, world, info, chunks, audio, input, {
     onKill: (e) => hud?.kill(e),
@@ -96,15 +160,22 @@ async function boot() {
     onPlayerHurt: (dir, amount) => hud?.hurt(dir, amount),
     onMessage: (text, kind) => hud?.message(text, kind),
     onEnd: (winner) => showEnd(winner),
+    onScore: (label, pts, big) => hud?.score(label, pts, big),
+    onDamage: (x, y, z, v, head, killed) => hud?.damage(x, y, z, v, head, killed),
   });
+  renderer.setLighting(settings.lighting);
   // compile shaders before the first visible frame so the menu doesn't stutter
+  chunks.primeMaterials();
   renderer.gl.compile(renderer.scene, renderer.camera);
+  chunks.updateCutout(0, 0, 0, 0, 0, 0);
   if (new URLSearchParams(location.search).has('debug')) Object.assign(window, { vw: { game, renderer, world } });
   await progress(1, 'Ready');
+  clearInterval(tipTimer);
   $('loading').classList.add('hidden');
   state = 'menu';
   $('menu').classList.remove('hidden');
   renderMenuKit();
+  renderCareer();
   if (new URLSearchParams(location.search).has('deploy')) {
     history.replaceState(null, '', location.pathname + location.search.replace(/[?&]deploy(=1)?/, '').replace(/^&/, '?'));
     deploy();
@@ -117,6 +188,51 @@ function renderMenuKit() {
   const item = ITEMS.find((i) => i.id === l.item)!;
   $('menu-kit').innerHTML = `<div class="kit-row"><span>Primary</span><b>${WEAPON[l.primary.id].name}</b></div><div class="kit-row"><span>Secondary</span><b>${WEAPON[l.secondary.id].name}</b></div><div class="kit-row"><span>Equipment</span><b>${item.name}</b></div>`;
 }
+
+function renderCareer() {
+  const c = career;
+  if (!c.matches) {
+    $('career').innerHTML = '<span class="empty">No matches yet. Deploy to start your record.</span>';
+    return;
+  }
+  const kd = (c.kills / Math.max(1, c.deaths)).toFixed(2);
+  const rows: [string, string | number][] = [
+    ['Matches', c.matches],
+    ['Wins', `${c.wins} · ${Math.round((c.wins / c.matches) * 100)}%`],
+    ['Kills / assists', `${c.kills} / ${c.assists}`],
+    ['K/D', kd],
+    ['Best streak', c.bestStreak],
+    ['Best score', c.bestScore.toLocaleString()],
+    ['Core damage', Math.round(c.coreDamage).toLocaleString()],
+  ];
+  $('career').innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('');
+}
+
+// match setup
+const DIFF_LABEL: Record<Difficulty, string> = { recruit: 'Recruit', regular: 'Regular', veteran: 'Veteran' };
+function syncSetup() {
+  const set = (id: string, v: string) => $(id).querySelectorAll<HTMLButtonElement>('button').forEach((b) => b.classList.toggle('on', b.dataset.v === v));
+  set('set-diff', settings.difficulty);
+  set('set-tod', settings.lighting);
+  set('set-len', String(settings.minutes));
+  $('deploy-sub').textContent = `${DIFF_LABEL[settings.difficulty]} bots · ${LIGHTING[settings.lighting].label} · ${settings.minutes} min`;
+}
+const bindSeg = (id: string, apply: (v: string) => void) =>
+  $(id).querySelectorAll<HTMLButtonElement>('button').forEach((b) =>
+    b.addEventListener('click', () => {
+      audio.uiClick();
+      apply(b.dataset.v!);
+      saveSettings();
+      syncSetup();
+    }),
+  );
+bindSeg('set-diff', (v) => (settings.difficulty = v as Difficulty));
+bindSeg('set-tod', (v) => {
+  settings.lighting = v as LightingId;
+  renderer.setLighting(settings.lighting);
+});
+bindSeg('set-len', (v) => (settings.minutes = +v));
+syncSetup();
 
 function openPanel(id: string) {
   audio.uiClick();
@@ -228,6 +344,7 @@ $('e-again').addEventListener('click', () => {
   location.href = `${location.pathname}?deploy=1`;
 });
 $('e-loadout').addEventListener('click', openLoadout);
+$('e-menu').addEventListener('click', () => location.reload());
 
 function setPaused(p: boolean) {
   if (state !== 'playing' || game.over) return;
@@ -295,7 +412,8 @@ function deploy() {
   $('menu').classList.add('hidden');
   $('hud').classList.remove('hidden');
   renderer.shadowExtent = 34;
-  game.start('You', JSON.parse(JSON.stringify(editor.loadout)));
+  renderer.shadowForce = true;
+  game.start('You', JSON.parse(JSON.stringify(editor.loadout)), { difficulty: settings.difficulty, minutes: settings.minutes });
   hud = new HUD(game);
   applySettings();
   refreshInputEnabled();
@@ -304,20 +422,78 @@ function deploy() {
 
 function showEnd(winner: Team) {
   const win = winner === TEAM_BLUE;
+  const p = game.player;
+  const all = [...game.soldiers];
+  const byScore = [...all].sort((a, b) => b.score - a.score);
+  const mvp = byScore[0];
+
+  // career
+  career.matches++;
+  if (win) career.wins++;
+  career.kills += p.kills;
+  career.deaths += p.deaths;
+  career.assists += p.assists;
+  career.bestStreak = Math.max(career.bestStreak, p.bestStreak);
+  const newBest = Math.round(p.score) > career.bestScore;
+  career.bestScore = Math.max(career.bestScore, Math.round(p.score));
+  career.coreDamage += p.coreDamage;
+  saveCareer();
+  renderCareer();
+
   const banner = $('end-banner');
   banner.className = win ? 'win' : 'lose';
-  banner.innerHTML = `<h1>${win ? 'Victory' : 'Defeat'}</h1><span>${TEAM_NAMES[winner]} team destroyed the enemy core</span>`;
+  const coreLeft = Math.round((game.cores[winner].hp / CORE_HP) * 100);
+  const how = game.cores[1 - winner].alive ? 'held the stronger core when time ran out' : `breached the enemy core with ${coreLeft}% of theirs intact`;
+  banner.innerHTML = `<h1>${win ? 'Victory' : 'Defeat'}</h1><span>${TEAM_NAMES[winner]} team ${how}</span>`;
+
+  const acc = p.pelletsFired ? Math.round((p.pelletsHit / p.pelletsFired) * 100) : 0;
+  const rank = byScore.indexOf(p) + 1;
+  $('end-me').innerHTML = `<div class="end-card"><h4>Your match${newBest ? ' · new personal best' : ''}</h4><div class="end-nums">
+    <div class="big"><b>${Math.round(p.score).toLocaleString()}</b><span>Score · #${rank}</span></div>
+    <div><b>${p.kills}</b><span>Kills</span></div>
+    <div><b>${p.assists}</b><span>Assists</span></div>
+    <div><b>${p.deaths}</b><span>Deaths</span></div>
+    <div><b>${acc}%</b><span>Accuracy</span></div>
+    <div><b>${Math.round(p.coreDamage)}</b><span>Core dmg</span></div>
+  </div></div>`;
+  const initials = mvp.name.slice(0, 2).toUpperCase();
+  $('end-mvp').innerHTML = `<div class="end-card"><h4>Most valuable</h4><div class="mvp"><div class="crest ${mvp.team === TEAM_BLUE ? 'blue' : 'red'}">${initials}</div><div><b>${esc(mvp.name)}</b><small>${Math.round(mvp.score).toLocaleString()} pts · ${mvp.kills} kills · ${mvp.assists} assists · ${Math.round(mvp.coreDamage)} core dmg</small></div></div></div>`;
+
+  // accolades: each goes to whoever earned it most, if it was earned at all
+  const best = (f: (s: Soldier) => number) => {
+    let b: Soldier | null = null;
+    for (const s of all) if (f(s) > 0 && (!b || f(s) > f(b))) b = s;
+    return b;
+  };
+  const pl = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  const awards: [string, Soldier | null, (s: Soldier) => string][] = [
+    ['Top gun', best((s) => s.kills), (s) => pl(s.kills, 'kill')],
+    ['Sharpshooter', best((s) => s.headshots), (s) => pl(s.headshots, 'headshot')],
+    ['Wingman', best((s) => s.assists), (s) => pl(s.assists, 'assist')],
+    ['Siege breaker', best((s) => s.coreDamage), (s) => `${Math.round(s.coreDamage)} core damage`],
+    ['Unstoppable', best((s) => (s.bestStreak >= 3 ? s.bestStreak : 0)), (s) => `${s.bestStreak} kill streak`],
+    ['Demolitionist', best((s) => s.voxelsDestroyed), (s) => `${s.voxelsDestroyed.toLocaleString()} voxels flattened`],
+  ];
+  $('end-awards').innerHTML = awards
+    .filter(([, s]) => s)
+    .map(([t, s, d], i) => `<div class="award" style="animation-delay:${0.15 + i * 0.08}s"><b>${t}</b><span>${s!.isPlayer ? 'You' : esc(s!.name)} · ${d(s!)}</span></div>`)
+    .join('');
+
   const rows = (team: number) =>
-    game.soldiers
+    all
       .filter((s) => s.team === team)
-      .sort((a, b) => b.kills - a.kills || a.deaths - b.deaths)
-      .map((s) => `<tr class="${s.isPlayer ? 'me' : ''}"><td>${s.name}</td><td>${s.kills}</td><td>${s.deaths}</td><td>${Math.round(s.damageDealt)}</td></tr>`)
+      .sort((a, b) => b.score - a.score)
+      .map((s) => `<tr class="${s.isPlayer ? 'me' : ''}"><td>${esc(s.name)}</td><td>${Math.round(s.score)}</td><td>${s.kills}</td><td>${s.assists}</td><td>${s.deaths}</td><td>${Math.round(s.coreDamage)}</td></tr>`)
       .join('');
   const table = (team: number) =>
-    `<div class="end-team ${team === TEAM_BLUE ? 'blue' : 'red'}"><h3>${TEAM_NAMES[team]}</h3><table><thead><tr><th>Name</th><th>K</th><th>D</th><th>Dmg</th></tr></thead><tbody>${rows(team)}</tbody></table></div>`;
+    `<div class="end-team ${team === TEAM_BLUE ? 'blue' : 'red'}"><h3>${TEAM_NAMES[team]}</h3><table><thead><tr><th>Name</th><th>Score</th><th>K</th><th>A</th><th>D</th><th>Core</th></tr></thead><tbody>${rows(team)}</tbody></table></div>`;
   $('end-stats').innerHTML = table(0) + table(1);
   $('end').classList.add('open');
   refreshInputEnabled();
+}
+
+function esc(s: string) {
+  return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 }
 
 // ------------------------------------------------------------------------------------ frame loop
@@ -345,7 +521,7 @@ function frame(now: number) {
     shared.uCutA.value.w = 0;
     shared.uCutB.value.w = 0;
     game.particles.update(dt);
-    chunks.update(3);
+    chunks.update(dt);
   } else if (state === 'playing') {
     if (!paused) {
       game.update(dt);

@@ -135,6 +135,16 @@ uniform float uHurt;
 uniform float uFlash;
 uniform float uDesat;
 uniform float uFxaa;
+uniform float uMist;
+uniform float uMistY;
+uniform vec3 uMistCol;
+
+float mhash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float mnoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mhash(i), mhash(i + vec2(1.0, 0.0)), u.x), mix(mhash(i + vec2(0.0, 1.0)), mhash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
 
 vec3 aces(vec3 x) {
   const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
@@ -198,11 +208,21 @@ void main() {
   float dist = length(vp.xyz);
   vec3 rd = normalize(wp - camP);
   float hfog = exp(-max(wp.y - 3.5, 0.0) * 0.32) * 0.55;
-  float fogAmt = 1.0 - exp(-dist * (0.0035 + hfog * 0.012));
+  float fogAmt = 1.0 - exp(-dist * (0.002 + hfog * 0.0055));
   if (d >= 0.99999) fogAmt = 1.0;
   float sunAmt = pow(max(dot(rd, uSunDir), 0.0), 6.0);
   vec3 fc = mix(uFogCol, uSunFog, sunAmt);
   col = mix(col, fc, clamp(fogAmt, 0.0, 1.0));
+
+  // low valley mist: pools just above the waterline and drifts with the wind
+  if (uMist > 0.0 && d < 0.99999) {
+    float layer = 1.0 - smoothstep(uMistY - 0.3, uMistY + 1.3, wp.y);
+    vec2 mp = wp.xz * 0.07 + vec2(uTime * 0.035, uTime * 0.015);
+    float n = mnoise(mp) * 0.6 + mnoise(mp * 2.3 + 7.1) * 0.4;
+    float mist = layer * smoothstep(0.38, 0.85, n) * uMist;
+    float sunLit = 0.75 + 0.25 * pow(max(dot(rd, uSunDir), 0.0), 3.0);
+    col = mix(col, mix(uMistCol, fc, 0.35) * sunLit, clamp(mist * 0.5, 0.0, 0.2));
+  }
 
   col += texture2D(tBloom, vUv).rgb * uBloom;
   col *= uExposure;
