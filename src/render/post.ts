@@ -116,6 +116,37 @@ void main() {
 }`,
 };
 
+/**
+ * Light shafts: march from each pixel toward the sun across the depth buffer and gather how much
+ * open sky lies along the way, so trees, cliffs and walls cut the glow into beams.
+ * Runs at quarter resolution; the composite blurs and tints the result.
+ */
+export const RaysShader = {
+  vertexShader: VS,
+  fragmentShader: /* glsl */ `
+varying vec2 vUv;
+uniform sampler2D tDepth;
+uniform vec2 uSunUv;
+uniform float uAspect;
+void main() {
+  const int N = 26;
+  vec2 toSun = uSunUv - vUv;
+  vec2 stp = toSun / float(N);
+  // interleaved gradient noise hides the step pattern (smoothed by the composite)
+  float jit = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+  vec2 p = vUv + stp * jit;
+  float acc = 0.0;
+  for (int i = 0; i < N; i++) {
+    vec2 q = (p - uSunUv) * vec2(uAspect, 1.0);
+    float glow = exp(-dot(q, q) * 7.0);
+    acc += step(0.99999, texture2D(tDepth, clamp(p, 0.001, 0.999)).x) * glow;
+    p += stp;
+  }
+  float len = length(toSun * vec2(uAspect, 1.0));
+  gl_FragColor = vec4(acc / float(N) * exp(-len * 1.6), 0.0, 0.0, 1.0);
+}`,
+};
+
 export const CompositeShader = {
   vertexShader: VS,
   fragmentShader: /* glsl */ `
@@ -125,6 +156,9 @@ uniform sampler2D tColor;
 uniform sampler2D tDepth;
 uniform sampler2D tDown;
 uniform sampler2D tBloom;
+uniform sampler2D tRays;
+uniform vec2 uRaysTexel;
+uniform float uRays;
 uniform vec2 uTexel;
 uniform vec2 uDownTexel;
 uniform float uNear;
@@ -169,6 +203,8 @@ vec3 skyColor(vec3 rd, vec3 camP) {
   c = mix(c, uFogCol * 0.92, smoothstep(0.0, -0.25, h));
   float sd = max(dot(rd, uSunDir), 0.0);
   c += uSunFog * (pow(sd, 6.0) * 0.28 + pow(sd, 90.0) * 0.5);
+  // bright haze band along the horizon, warmest under the sun
+  c += uSunFog * pow(1.0 - abs(h), 12.0) * (0.05 + 0.22 * pow(sd, 3.0));
   if (h > 0.0) {
     // cloud deck ~140 m up, same drift as the cloud shadows on the ground
     vec2 cp = camP.xz + rd.xz / max(h, 0.035) * 140.0;
@@ -182,6 +218,8 @@ vec3 skyColor(vec3 rd, vec3 camP) {
     c = mix(c, cc, dens * 0.85);
     // sun disc peeks through thin cloud
     c += uSunDisc * smoothstep(0.99955, 0.99975, sd) * (1.0 - dens * 0.9);
+    // corona around the disc, which the bloom spreads into glare
+    c += uSunDisc * pow(sd, 700.0) * 0.12 * (1.0 - dens * 0.75);
   }
   return c;
 }
@@ -249,8 +287,11 @@ void main() {
   vec3 rd = normalize(wp - camP);
   float hfog = exp(-max(wp.y - 3.5, 0.0) * 0.32) * 0.55;
   float fogAmt = 1.0 - exp(-dist * (0.002 + hfog * 0.0055));
-  float sunAmt = pow(max(dot(rd, uSunDir), 0.0), 6.0);
+  float sd = max(dot(rd, uSunDir), 0.0);
+  float sunAmt = pow(sd, 6.0);
   vec3 fc = mix(uFogCol, uSunFog, sunAmt);
+  // forward scattering: the haze glows toward the sun
+  fc += uSunFog * pow(sd, 24.0) * 0.4;
   if (d >= 0.99999) col = skyColor(rd, camP);
   else col = mix(col, fc, clamp(fogAmt, 0.0, 1.0));
 
@@ -270,6 +311,15 @@ void main() {
     col = mix(col * vec3(0.55, 0.8, 0.85), vec3(0.08, 0.2, 0.22), clamp(uw, 0.25, 0.95));
   }
 
+  // light shafts (small tent blur over the quarter-res march)
+  if (uRays > 0.0) {
+    vec2 o = uRaysTexel * 0.75;
+    float r = texture2D(tRays, vUv).r * 0.4;
+    r += (texture2D(tRays, vUv + vec2(o.x, o.y)).r + texture2D(tRays, vUv + vec2(-o.x, o.y)).r
+      + texture2D(tRays, vUv + vec2(o.x, -o.y)).r + texture2D(tRays, vUv + vec2(-o.x, -o.y)).r) * 0.15;
+    col += uSunFog * r * uRays;
+  }
+
   col += texture2D(tBloom, vUv).rgb * uBloom;
   col *= uExposure;
   col = aces(col);
@@ -277,7 +327,8 @@ void main() {
   float l = luma(col);
   col = mix(vec3(l), col, 1.12 - uDesat * 0.9);
   col = mix(col, col * col * (3.0 - 2.0 * col), 0.22);
-  col *= vec3(1.02, 1.0, 0.97);
+  // split tone: cool, sky-lit shadows and warm, sunlit highlights
+  col *= mix(vec3(0.97, 1.0, 1.04), vec3(1.06, 1.0, 0.92), smoothstep(0.05, 0.75, luma(col)));
   // vignette + hurt pulse + flash
   vec2 q = vUv - 0.5;
   float vig = 1.0 - dot(q, q) * 0.55;
