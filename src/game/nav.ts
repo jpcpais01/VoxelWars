@@ -2,10 +2,12 @@ import { VOXEL, WATER_Y, WX, WZ } from '../core/config';
 import { World } from '../world/World';
 
 /**
- * 2.5D navigation grid. Each cell covers 2x2 voxel columns (0.8 m). Cells store the standable
- * floor height; edges allow stepping one voxel (or two with a jump at extra cost).
+ * 2.5D navigation grid. Each cell covers 0.8 m of voxel columns. Cells store the standable
+ * floor height (in voxels); edges allow stepping up 0.4 m (or 0.8 m with a jump at extra cost).
  */
-export const NAV_CELL = 2;
+export const NAV_CELL = Math.round(0.8 / VOXEL);
+/** voxels per 0.4 m, the unit the step rules are written in */
+const U = Math.round(0.4 / VOXEL);
 export const NW = WX / NAV_CELL;
 export const ND = WZ / NAV_CELL;
 const CELL_M = NAV_CELL * VOXEL;
@@ -94,7 +96,7 @@ export class Nav {
         if (f > mx) mx = f;
       }
     const k = cx * ND + cz;
-    if (mx - mn > 2 || mx >= 60) {
+    if (mx - mn > 2 * U || mx * VOXEL >= 24) {
       this.h[k] = BLOCKED;
       return;
     }
@@ -147,9 +149,9 @@ export class Nav {
     const ha = this.h[a], hb = this.h[b];
     if (hb === BLOCKED) return -1;
     const d = hb - ha;
-    if (d > 2) return -1;
-    if (d < -6) return -1;
-    return d === 2 ? 3 : d < -2 ? 1.5 : 1;
+    if (d > 2 * U) return -1;
+    if (d < -6 * U) return -1;
+    return d > U ? 3 : d < -2 * U ? 1.5 : 1;
   }
 
   findPath(sx: number, sz: number, tx: number, tz: number, maxExpand = 14000): NavPoint[] | null {
@@ -245,7 +247,7 @@ export class Nav {
     let anchor = 0;
     const toPt = (k: number, jump = false): NavPoint => ({ x: (((k / ND) | 0) + 0.5) * CELL_M, z: ((k % ND) + 0.5) * CELL_M, jump });
     for (let i = 1; i < cells.length; i++) {
-      const jumpEdge = this.h[cells[i]] - this.h[cells[i - 1]] >= 2;
+      const jumpEdge = this.h[cells[i]] - this.h[cells[i - 1]] > U;
       if (jumpEdge) {
         pts.push(toPt(cells[i - 1]));
         pts.push(toPt(cells[i], true));

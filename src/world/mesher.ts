@@ -217,6 +217,135 @@ function emitQuad(
 }
 
 // ---------------------------------------------------------------------------
+// Chunk builds: level-of-detail meshes and grass from one copy of the fine voxels.
+
+/** LOD l meshes 2^l x 2^l x 2^l voxel blocks as one cell */
+export const LOD_LEVELS = 3;
+/** fine voxels of padding on each horizontal side of a chunk copy (enough for the coarsest LOD) */
+export const CHUNK_PAD = 1 << (LOD_LEVELS - 1);
+/** coarse cells of wall kept on chunk borders so neighbours at another LOD never show a crack */
+const SKIRT = 3;
+
+export interface ChunkBuild {
+  meshes: { lod: number; mesh: MeshData }[];
+  grass: GrassData | null;
+}
+
+let lodVol = new Uint8Array(0);
+const counts = new Uint16Array(256);
+/** trunks, posts and poles: thinner than a coarse cell, but they hold things up, so they survive downsampling */
+const THIN = new Uint8Array(256);
+for (const m of [M.OAK_BARK, M.PINE_BARK, M.BIRCH_BARK, M.PLANK_DARK, M.STEEL_DARK, M.LOG_END]) THIN[m] = 1;
+
+/**
+ * Padded (1 cell) volume for one LOD, downsampled from the fine chunk copy.
+ * A coarse cell is solid when at least 3/8 of its block is, and takes the most common material
+ * of the highest occupied layer, so grass stays on top of hills and roofs keep their tiles.
+ */
+function lodVolume(fine: Uint8Array, fx: number, fy: number, fz: number, pad: number, n: number, lod: number) {
+  const f = 1 << lod;
+  const cn = n >> lod, cy = fy >> lod;
+  const px = cn + 2, py = cy + 2, pz = cn + 2;
+  const size = px * py * pz;
+  if (lodVol.length < size) lodVol = new Uint8Array(size);
+  const vol = lodVol;
+  const need = Math.ceil((f * f * f * 3) / 8);
+  for (let a = 0; a < px; a++) {
+    const x0 = pad + (a - 1) * f;
+    for (let c = 0; c < pz; c++) {
+      const z0 = pad + (c - 1) * f;
+      const dst = (a * pz + c) * py;
+      vol[dst] = 1; // below bedrock
+      vol[dst + py - 1] = 0;
+      for (let b = 1; b <= cy; b++) {
+        const y0 = (b - 1) * f;
+        if (f === 1) {
+          vol[dst + b] = fine[(x0 * fz + z0) * fy + y0];
+          continue;
+        }
+        let solid = 0;
+        let topY = -1;
+        let thin = 0, thinM = 0;
+        for (let i = 0; i < f; i++)
+          for (let k = 0; k < f; k++) {
+            const col = ((x0 + i) * fz + z0 + k) * fy + y0;
+            for (let j = 0; j < f; j++) {
+              const m = fine[col + j];
+              if (m !== 0) {
+                solid++;
+                if (j > topY) topY = j;
+                if (THIN[m]) {
+                  thin++;
+                  thinM = m;
+                }
+              }
+            }
+          }
+        if (solid < need) {
+          // a one-voxel trunk running through the block keeps it, so far trees don't float
+          vol[dst + b] = thin >= f ? thinM : 0;
+          continue;
+        }
+        // most common material in the highest occupied layer
+        let best = 0, bestN = 0;
+        for (let i = 0; i < f; i++)
+          for (let k = 0; k < f; k++) {
+            const m = fine[((x0 + i) * fz + z0 + k) * fy + y0 + topY];
+            if (m === 0) continue;
+            const c2 = ++counts[m];
+            if (c2 > bestN) {
+              bestN = c2;
+              best = m;
+            }
+          }
+        for (let i = 0; i < f; i++)
+          for (let k = 0; k < f; k++) counts[fine[((x0 + i) * fz + z0 + k) * fy + y0 + topY]] = 0;
+        vol[dst + b] = best;
+      }
+    }
+  }
+  if (lod > 0) {
+    // skirts: drop the top few cells of every border column so the chunk keeps its own edge walls
+    for (let a = 0; a < px; a++)
+      for (let c = 0; c < pz; c++) {
+        if (a !== 0 && c !== 0 && a !== px - 1 && c !== pz - 1) continue;
+        const dst = (a * pz + c) * py;
+        let t = py - 2;
+        while (t > 0 && vol[dst + t] === 0) t--;
+        for (let y = Math.max(1, t - SKIRT + 1); y <= t; y++) vol[dst + y] = 0;
+      }
+  }
+  return { vol, px, py, pz };
+}
+
+/**
+ * @param fine raw world copy, layout (x * fz + z) * fy + y, with `pad` extra columns on each
+ *   horizontal side and the full world height (fy) with no vertical padding
+ * @param lods bitmask of LOD levels to mesh
+ */
+export function buildChunk(
+  fine: Uint8Array,
+  fx: number,
+  fy: number,
+  fz: number,
+  pad: number,
+  lods: number,
+  withGrass: boolean,
+  ox: number,
+  oz: number,
+  density: (wx: number, wz: number) => number,
+): ChunkBuild {
+  const n = fx - pad * 2;
+  const meshes: ChunkBuild['meshes'] = [];
+  for (let lod = 0; lod < LOD_LEVELS; lod++) {
+    if (!(lods & (1 << lod))) continue;
+    const v = lodVolume(fine, fx, fy, fz, pad, n, lod);
+    meshes.push({ lod, mesh: greedyMesh(v.vol, v.px, v.py, v.pz) });
+  }
+  return { meshes, grass: withGrass ? grassMesh(fine, fx, fy, fz, pad, ox, oz, density) : null };
+}
+
+// ---------------------------------------------------------------------------
 // Grass tufts: stylised low-poly blades scattered on exposed grass tops.
 
 let gPos = new Float32Array(1 << 16);
@@ -230,11 +359,15 @@ const FLOWER_COLORS = [
   [120, 180, 255],
 ];
 
+/** tufts are authored per 0.4 m column: thin them out on finer grids */
+const TUFT_K = (VOXEL / 0.4) ** 2;
+
 export function grassMesh(
   vol: Uint8Array,
   sx: number,
   sy: number,
   sz: number,
+  pad: number,
   ox: number,
   oz: number,
   density: (wx: number, wz: number) => number,
@@ -260,11 +393,11 @@ export function grassMesh(
   };
   if (gCol.length < (gPos.length / 3) * 4) gCol = new Uint8Array((gPos.length / 3) * 4);
 
-  for (let lx = 1; lx < sx - 1; lx++) {
-    for (let lz = 1; lz < sz - 1; lz++) {
+  for (let lx = pad; lx < sx - pad; lx++) {
+    for (let lz = pad; lz < sz - pad; lz++) {
       const colBase = (lx * sz + lz) * sy;
       let ty = -1;
-      for (let y = sy - 2; y >= 1; y--) {
+      for (let y = sy - 1; y >= 1; y--) {
         if (vol[colBase + y] !== 0) {
           ty = y;
           break;
@@ -273,10 +406,10 @@ export function grassMesh(
       if (ty < 0) continue;
       const m = vol[colBase + ty];
       if (m !== M.GRASS && m !== M.FLOWER_BED) continue;
-      const wx = lx - 1 + ox;
-      const wz = lz - 1 + oz;
-      const wy = ty - 1; // interior y == world y (chunks start at 0)
-      const dens = density(wx, wz) * (m === M.FLOWER_BED ? 1.4 : 1);
+      const wx = lx - pad + ox;
+      const wz = lz - pad + oz;
+      const wy = ty; // chunks span the full height, so local y == world y
+      const dens = density(wx, wz) * (m === M.FLOWER_BED ? 1.4 : 1) * TUFT_K;
       const hsh = hash3(wx, wy, wz, 77);
       if (hsh > dens) continue;
       const tufts = m === M.FLOWER_BED ? 2 : 1;

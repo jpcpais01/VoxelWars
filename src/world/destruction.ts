@@ -14,6 +14,16 @@ export interface DestructionEvents {
   onTopple(x: number, y: number, z: number, isTree: boolean): void;
 }
 
+/** voxels per 0.4 m cube: event sizes and limits were tuned in 0.4 m voxels */
+const VK3 = (VOXEL / 0.4) ** 3;
+/** reference size for debris chunks (metres), so they don't shrink with the voxel grid */
+const DEB = 0.32;
+/** finer voxels are weaker: a bullet now chips 0.2 m cubes, plus a little around them */
+const HP_K = 0.45;
+
+const LEAF = new Uint8Array(256);
+MATS.forEach((d, i) => { if (d.kind === 'leaf') LEAF[i] = 1; });
+
 const linearColor = (m: number, out = new THREE.Color()) => {
   const p = shared.uPalette.value[m];
   if (!p) return out.setRGB(0.5, 0.5, 0.5);
@@ -112,7 +122,7 @@ class FallingBody {
     const step = Math.max(1, Math.floor(n / 40));
     for (let i = 0; i < n; i += step) this.samples.push(i);
 
-    const tall = sy > Math.max(sx, sz) * 1.5 && sy >= 6;
+    const tall = sy > Math.max(sx, sz) * 1.5 && sy * VOXEL >= 2.4;
     this.topple = tall;
     if (tall) {
       const d = dir.clone().setY(0);
@@ -183,7 +193,7 @@ class FallingBody {
 export class Destruction {
   private seeds = new Set<number>();
   private bodies: FallingBody[] = [];
-  private q = new Int32Array(8192);
+  private q = new Int32Array(65536);
   lastDir = new THREE.Vector3(1, 0, 0);
   private tmpC = new THREE.Color();
   barrelsPending: { x: number; y: number; z: number; size: number; t: number }[] = [];
@@ -218,7 +228,7 @@ export class Destruction {
     const stack = [[x, y, z]];
     let n = 1, sx = x, sy = y, sz = z;
     const seen = new Set<number>();
-    while (stack.length && n < 64) {
+    while (stack.length && n < 64 / VK3) {
       const [a, b, c] = stack.pop()!;
       for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
         const nx = a + dx, ny = b + dy, nz = c + dz;
@@ -232,17 +242,31 @@ export class Destruction {
         sx += nx; sy += ny; sz += nz; n++;
       }
     }
-    this.barrelsPending.push({ x: ((sx / n) + 0.5) * VOXEL, y: ((sy / n) + 0.5) * VOXEL, z: ((sz / n) + 0.5) * VOXEL, size: n, t: 0.12 + Math.random() * 0.1 });
+    this.barrelsPending.push({ x: ((sx / n) + 0.5) * VOXEL, y: ((sy / n) + 0.5) * VOXEL, z: ((sz / n) + 0.5) * VOXEL, size: n * VK3, t: 0.12 + Math.random() * 0.1 });
   }
 
-  /** Bullet impact on a voxel. Returns true if it broke. */
+  /** Bullet impact on a voxel (plus a little splash around it). Returns true if it broke. */
   damageVoxel(x: number, y: number, z: number, amount: number, dir: THREE.Vector3): boolean {
+    const broke = this.hitVoxel(x, y, z, amount, dir, true);
+    // spread a share of the hit into the surface around it and the voxel behind
+    const ax = Math.abs(dir.x), ay = Math.abs(dir.y), az = Math.abs(dir.z);
+    const axis = ax > ay && ax > az ? 0 : ay > az ? 1 : 2;
+    const s = axis === 0 ? Math.sign(dir.x) : axis === 1 ? Math.sign(dir.y) : Math.sign(dir.z);
+    for (let k = 0; k < 3; k++) {
+      if (k === axis) continue;
+      for (const d of [-1, 1]) this.hitVoxel(x + (k === 0 ? d : 0), y + (k === 1 ? d : 0), z + (k === 2 ? d : 0), amount * 0.3, dir, false);
+    }
+    this.hitVoxel(x + (axis === 0 ? s : 0), y + (axis === 1 ? s : 0), z + (axis === 2 ? s : 0), amount * 0.4, dir, false);
+    return broke;
+  }
+
+  private hitVoxel(x: number, y: number, z: number, amount: number, dir: THREE.Vector3, chips: boolean): boolean {
     const w = this.world;
     if (!w.inBounds(x, y, z)) return false;
     const i = w.idx(x, y, z);
     const m = w.vox[i];
     if (m === 0) return false;
-    const hp = MATS[m].hp;
+    const hp = MATS[m].hp * HP_K;
     if (hp <= 0) return false;
     const acc = (w.damage.get(i) ?? 0) + amount;
     if (acc < hp) {
@@ -253,11 +277,12 @@ export class Destruction {
     this.removeVoxel(x, y, z, m);
     const c = linearColor(m, this.tmpC);
     const leafy = MATS[m].kind === 'leaf';
-    for (let k = 0; k < (leafy ? 3 : 2); k++) {
+    const n = chips ? (leafy ? 3 : 2) : Math.random() < 0.5 ? 1 : 0;
+    for (let k = 0; k < n; k++) {
       this.debris.spawn(
         (x + 0.5) * VOXEL, (y + 0.5) * VOXEL, (z + 0.5) * VOXEL,
         -dir.x * 2 + (Math.random() - 0.5) * 3, 2 + Math.random() * 3, -dir.z * 2 + (Math.random() - 0.5) * 3,
-        VOXEL * (leafy ? 0.3 : 0.45), c, leafy ? 3 : 4, leafy,
+        DEB * (leafy ? 0.3 : 0.45), c, leafy ? 3 : 4, leafy,
       );
     }
     return true;
@@ -298,6 +323,7 @@ export class Destruction {
           }
         }
     const keepDebris = Math.min(1, debrisBudget / Math.max(1, cands.length));
+    const removedAt: number[] = [];
     for (const i of cands) {
       const m = w.vox[i];
       if (m === 0) continue;
@@ -311,62 +337,161 @@ export class Destruction {
         const l = Math.hypot(dx, dy, dz) + 0.1;
         const sp = 6 + Math.random() * 9;
         const leafy = MATS[m].kind === 'leaf';
-        this.debris.spawn(px, py, pz, (dx / l) * sp, (dy / l) * sp + 4, (dz / l) * sp, VOXEL * (0.5 + Math.random() * 0.45), linearColor(m, this.tmpC), 5, leafy);
+        this.debris.spawn(px, py, pz, (dx / l) * sp, (dy / l) * sp + 4, (dz / l) * sp, DEB * (0.5 + Math.random() * 0.45), linearColor(m, this.tmpC), 5, leafy);
       }
-      this.removeVoxel(x, y, z, m);
+      w.set(x, y, z, 0);
+      if (MATS[m].explosive) this.triggerBarrel(x, y, z);
+      removedAt.push(x, y, z);
       removed++;
+    }
+    // only the crater's shell can have lost its support: seed the flood fill from there
+    const vox = w.vox;
+    for (let k = 0; k < removedAt.length; k += 3) {
+      const x = removedAt[k], y = removedAt[k + 1], z = removedAt[k + 2];
+      const i = w.idx(x, y, z);
+      if (x > 0 && vox[i - WZ * WY]) this.seeds.add(i - WZ * WY);
+      if (x < WX - 1 && vox[i + WZ * WY]) this.seeds.add(i + WZ * WY);
+      if (z > 0 && vox[i - WY]) this.seeds.add(i - WY);
+      if (z < WZ - 1 && vox[i + WY]) this.seeds.add(i + WY);
+      if (y > 0 && vox[i - 1]) this.seeds.add(i - 1);
+      if (y < WY - 1 && vox[i + 1]) this.seeds.add(i + 1);
     }
     return removed;
   }
 
-  /** Flood fill from seeds; anything not connected to bedrock becomes a falling body. */
+  /**
+   * Foliage owned by a falling structure: a multi-source BFS through leaves near it, started at the
+   * same time from every leaf touching this structure and from every leaf touching other support.
+   */
+  private claimFoliage(body: Set<number>, touch: number[]) {
+    const vox = this.world.vox;
+    let x0 = WX, x1 = 0, z0 = WZ, z1 = 0, y0 = WY, y1 = 0;
+    for (const i of body) {
+      const y = i % WY, t = (i / WY) | 0, z = t % WZ, x = (t / WZ) | 0;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (z < z0) z0 = z;
+      if (z > z1) z1 = z;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+    const M_ = 24;
+    x0 = Math.max(0, x0 - M_); x1 = Math.min(WX - 1, x1 + M_);
+    z0 = Math.max(0, z0 - M_); z1 = Math.min(WZ - 1, z1 + M_);
+    y0 = Math.max(1, y0 - 4); y1 = Math.min(WY - 2, y1 + M_);
+    const owner = new Map<number, number>();
+    const q: number[] = [];
+    for (const l of touch) if (!owner.has(l)) { owner.set(l, 1); q.push(l); }
+    const SX = WZ * WY;
+    const nOff = [SX, -SX, WY, -WY, 1, -1];
+    // rival sources: leaves in the box resting on anything solid that isn't this body
+    for (let x = x0; x <= x1; x++)
+      for (let z = z0; z <= z1; z++) {
+        const col = (x * WZ + z) * WY;
+        for (let y = y0; y <= y1; y++) {
+          const i = col + y;
+          if (LEAF[vox[i]] !== 1 || owner.has(i)) continue;
+          for (const o of nOff) {
+            const n = i + o;
+            const m = vox[n];
+            if (m !== 0 && LEAF[m] !== 1 && !body.has(n)) {
+              owner.set(i, 2);
+              q.push(i);
+              break;
+            }
+          }
+        }
+      }
+    for (let h = 0; h < q.length; h++) {
+      const i = q[h];
+      const own = owner.get(i)!;
+      const y = i % WY, t = (i / WY) | 0, z = t % WZ, x = (t / WZ) | 0;
+      if (x <= x0 || x >= x1 || z <= z0 || z >= z1 || y <= y0 || y >= y1) continue;
+      for (const o of nOff) {
+        const n = i + o;
+        if (LEAF[vox[n]] !== 1 || owner.has(n)) continue;
+        owner.set(n, own);
+        q.push(n);
+      }
+    }
+    for (const [i, own] of owner) if (own === 1) body.add(i);
+  }
+
+  /**
+   * Flood fill from seeds; anything not connected to bedrock becomes a falling body.
+   * Leaves never carry load: support only travels through solid material, so trees whose crowns
+   * touch don't hold each other up. A toppling tree takes the foliage nearer its own wood than
+   * any other support, which is how crowns are split between neighbours.
+   */
   private processSeeds() {
     if (this.seeds.size === 0) return;
     const w = this.world;
     const vox = w.vox;
     const grounded = new Set<number>();
-    const LIMIT = 5200;
+    const heldLeaves = new Set<number>();
+    const LIMIT = 5200 / VK3;
+    const ground = w.ground;
     const seeds = [...this.seeds];
     this.seeds.clear();
     const SX = WZ * WY;
+    const nbs = (idx: number, out: number[]) => {
+      const y = idx % WY;
+      const t = (idx / WY) | 0;
+      const z = t % WZ;
+      const x = (t / WZ) | 0;
+      out[0] = x > 0 ? idx - SX : -1;
+      out[1] = x < WX - 1 ? idx + SX : -1;
+      out[2] = z > 0 ? idx - WY : -1;
+      out[3] = z < WZ - 1 ? idx + WY : -1;
+      out[4] = y > 0 ? idx - 1 : -1;
+      out[5] = y < WY - 1 ? idx + 1 : -1;
+    };
+    const nb = [0, 0, 0, 0, 0, 0];
     for (const s of seeds) {
-      if (vox[s] === 0 || grounded.has(s)) continue;
+      if (vox[s] === 0 || grounded.has(s) || heldLeaves.has(s)) continue;
+      const leafSeed = LEAF[vox[s]] === 1;
       const visited = new Set<number>([s]);
+      const touchLeaves: number[] = [];
       const q = this.q;
       let head = 0, tail = 0;
       q[tail++] = s;
       let isGround = false;
-      while (head < tail) {
+      while (head < tail && !isGround) {
         const idx = q[head++];
         const y = idx % WY;
-        if (y <= 1) { isGround = true; break; }
-        const t = (idx / WY) | 0;
-        const z = t % WZ;
-        const x = (t / WZ) | 0;
-        const nb = [
-          x > 0 ? idx - SX : -1, x < WX - 1 ? idx + SX : -1,
-          z > 0 ? idx - WY : -1, z < WZ - 1 ? idx + WY : -1,
-          idx - 1, y < WY - 1 ? idx + 1 : -1,
-        ];
+        // anything inside the original terrain is held by the ground itself
+        if (y <= 1 || y < ground[(idx / WY) | 0]) { isGround = true; break; }
+        nbs(idx, nb);
         for (const n of nb) {
           if (n < 0 || vox[n] === 0 || visited.has(n)) continue;
-          if (grounded.has(n)) { isGround = true; break; }
+          const leaf = LEAF[vox[n]] === 1;
+          if (leafSeed) {
+            // a loose clump of foliage is held as soon as it touches anything solid
+            if (!leaf || heldLeaves.has(n)) { isGround = true; break; }
+          } else if (leaf) {
+            touchLeaves.push(n);
+            continue;
+          } else if (grounded.has(n)) { isGround = true; break; }
           visited.add(n);
           if (tail >= q.length) { isGround = true; break; }
           q[tail++] = n;
         }
-        if (isGround || visited.size > LIMIT) { isGround = true; break; }
+        if (visited.size > LIMIT) isGround = true;
       }
       if (isGround) {
-        for (const v of visited) grounded.add(v);
+        const into = leafSeed ? heldLeaves : grounded;
+        for (const v of visited) into.add(v);
         continue;
       }
+      if (!leafSeed && touchLeaves.length) this.claimFoliage(visited, touchLeaves);
       const list = [...visited];
-      if (list.length < 7) {
+      if (list.length < 7 / VK3) {
+        // crumbs: a few chunks of debris, the rest just goes
+        let chips = 6;
         for (const i of list) {
           const y = i % WY, t = (i / WY) | 0, z = t % WZ, x = (t / WZ) | 0;
           const m = vox[i];
-          this.debris.spawn((x + 0.5) * VOXEL, (y + 0.5) * VOXEL, (z + 0.5) * VOXEL, (Math.random() - 0.5) * 2, 0, (Math.random() - 0.5) * 2, VOXEL * 0.9, linearColor(m, this.tmpC), 4, MATS[m].kind === 'leaf');
+          if (chips-- > 0) this.debris.spawn((x + 0.5) * VOXEL, (y + 0.5) * VOXEL, (z + 0.5) * VOXEL, (Math.random() - 0.5) * 2, 0, (Math.random() - 0.5) * 2, DEB * 0.9, linearColor(m, this.tmpC), 4, MATS[m].kind === 'leaf');
           w.set(x, y, z, 0);
         }
         continue;
@@ -403,13 +528,13 @@ export class Destruction {
       sx += v.x; sy += v.y; sz += v.z;
       const keep = kind === 'leaf' ? 0.72 : 0.86;
       if (Math.random() > keep) {
-        if (debrisLeft-- > 0) this.debris.spawn(v.x, v.y, v.z, (Math.random() - 0.5) * 4, 2 + Math.random() * 3, (Math.random() - 0.5) * 4, VOXEL * 0.7, linearColor(m, this.tmpC), 4, kind === 'leaf');
+        if (debrisLeft-- > 0) this.debris.spawn(v.x, v.y, v.z, (Math.random() - 0.5) * 4, 2 + Math.random() * 3, (Math.random() - 0.5) * 4, DEB * 0.7, linearColor(m, this.tmpC), 4, kind === 'leaf');
         continue;
       }
       let x = Math.floor(v.x / VOXEL), y = Math.floor(v.y / VOXEL), z = Math.floor(v.z / VOXEL);
       if (!w.inBounds(x, Math.max(1, y), z)) continue;
       y = Math.max(1, y);
-      for (let k = 0; k < 3; k++) {
+      for (let k = 0; k < 6; k++) {
         if (y + k < WY && w.get(x, y + k, z) === 0) {
           w.set(x, y + k, z, m);
           break;
@@ -421,7 +546,7 @@ export class Destruction {
     (b.voxMesh.material as THREE.Material).dispose();
     const cx = sx / n, cy = sy / n, cz = sz / n;
     for (let i = 0; i < 10; i++) this.particles.dust(cx + (Math.random() - 0.5) * (maxX - minX), cy, cz + (Math.random() - 0.5) * (maxZ - minZ), 0.55, 0.5, 0.42, 2, 2);
-    this.ev.onBodyImpact(cx, cy, cz, n, minX, minZ, maxX, maxZ, b.isTree);
+    this.ev.onBodyImpact(cx, cy, cz, n * VK3, minX, minZ, maxX, maxZ, b.isTree);
   }
 
   update(dt: number) {

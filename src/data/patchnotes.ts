@@ -7,6 +7,17 @@ export interface PatchGroup {
 
 export const PATCH_NOTES: PatchGroup[] = [
   {
+    hour: '2026-10-20 · 19:00 UTC',
+    title: 'Twice as Fine',
+    entries: [
+      'The whole world is now built from voxels half the size: 20 cm blocks instead of 40 cm, eight times as many in the same valley. Hills roll in gentle steps, riverbanks slope into sand and mud, rock outcrops show layered strata, and both halves of the map are now an exact mirror of each other, lake shoreline included.',
+      'Every building is rebuilt at the new detail. The HQ bunkers have panel joints, a blast door, firing slits, roof vents, an antenna and dish, lamps at the entrance, staggered sandbag walls, steel hedgehogs, a braced watchtower with a ladder and a supply depot under a camo net. The cabins get log walls, a fireplace, furniture, a porch, a fenced yard, hay bales and a well, and the ruins, island tower, bridges and docks are all new too.',
+      'A new forest: tapered pines, broad oaks with branching limbs, birches with dark bark marks, berry bushes, ferns that sway in the wind, fallen logs, stumps, mossy boulders and pebbles.',
+      'Smooth at any distance: the world now draws in three levels of detail, full detail around you and lighter versions further away, so the finer world runs about as fast as the old one. Settings quality also sets how far full detail reaches.',
+      'Destruction at the new scale: bullets chip 20 cm blocks and crack the ones around them, explosions carve smoother craters, and trees only hold each other up through their trunks now, so a tree you cut down topples even when its crown touches a neighbour and takes just its own leaves with it.',
+    ],
+  },
+  {
     hour: '2026-10-20 · 18:00 UTC',
     title: 'Through Your Own Eyes',
     entries: [

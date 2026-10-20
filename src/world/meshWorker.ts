@@ -1,17 +1,25 @@
 /// <reference lib="webworker" />
-// Off-main-thread meshing and sky-light baking. The main thread copies a padded chunk volume
-// (about 75 KB), we return the packed vertex streams as transferables.
-import { greedyMesh, grassMesh } from './mesher';
+// Off-main-thread meshing and sky-light baking. The main thread copies a chunk's fine voxels
+// (with a little padding), we return packed vertex streams for each requested LOD as transferables.
+import { buildChunk } from './mesher';
 import { computeSky, SKY_D, SKY_H, SKY_W } from './skyLight';
 import { WX, WZ } from '../core/config';
 
+export interface MeshOut {
+  lod: number;
+  positions: Uint8Array;
+  data: Uint8Array;
+  indices: Uint16Array | Uint32Array;
+  vertexCount: number;
+}
+
 export type WorkerIn =
   | { type: 'init'; grass: Uint8Array }
-  | { type: 'chunk'; job: number; key: number; vol: Uint8Array; sx: number; sy: number; sz: number; ox: number; oz: number }
+  | { type: 'chunk'; job: number; key: number; ver: number; vol: Uint8Array; sx: number; sy: number; sz: number; pad: number; lods: number; grass: boolean; ox: number; oz: number }
   | { type: 'sky'; job: number; top: Uint8Array; i0: number; i1: number; j0: number; j1: number };
 
 export type WorkerOut =
-  | { type: 'chunk'; job: number; key: number; positions: Uint8Array; data: Uint8Array; indices: Uint16Array | Uint32Array; vertexCount: number; gPos: Float32Array; gCol: Uint8Array; gCount: number }
+  | { type: 'chunk'; job: number; key: number; ver: number; meshes: MeshOut[]; gPos: Float32Array | null; gCol: Uint8Array | null; gCount: number }
   | { type: 'sky'; job: number; data: Uint8Array; i0: number; i1: number; j0: number; j1: number };
 
 let grass: Uint8Array | null = null;
@@ -25,25 +33,26 @@ ctx.onmessage = (e: MessageEvent<WorkerIn>) => {
     return;
   }
   if (m.type === 'chunk') {
-    const md = greedyMesh(m.vol, m.sx, m.sy, m.sz);
     const dens = grass;
-    const gd = grassMesh(m.vol, m.sx, m.sy, m.sz, m.ox, m.oz, (wx, wz) => {
+    const b = buildChunk(m.vol, m.sx, m.sy, m.sz, m.pad, m.lods, m.grass, m.ox, m.oz, (wx, wz) => {
       if (!dens || wx < 0 || wz < 0 || wx >= WX || wz >= WZ) return 0;
       return dens[wx * WZ + wz] / 255;
     });
+    const meshes: MeshOut[] = b.meshes.map((x) => ({ lod: x.lod, ...x.mesh }));
+    const transfer: Transferable[] = [];
+    for (const x of meshes) transfer.push(x.positions.buffer, x.data.buffer, x.indices.buffer);
+    if (b.grass) transfer.push(b.grass.positions.buffer, b.grass.colors.buffer);
     const out: WorkerOut = {
       type: 'chunk',
       job: m.job,
       key: m.key,
-      positions: md.positions,
-      data: md.data,
-      indices: md.indices,
-      vertexCount: md.vertexCount,
-      gPos: gd.positions,
-      gCol: gd.colors,
-      gCount: gd.vertexCount,
+      ver: m.ver,
+      meshes,
+      gPos: b.grass?.positions ?? null,
+      gCol: b.grass?.colors ?? null,
+      gCount: b.grass?.vertexCount ?? 0,
     };
-    ctx.postMessage(out, [md.positions.buffer, md.data.buffer, md.indices.buffer, gd.positions.buffer, gd.colors.buffer]);
+    ctx.postMessage(out, transfer);
     return;
   }
   if (m.type === 'sky') {

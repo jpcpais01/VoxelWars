@@ -1,15 +1,19 @@
-import { WX, WY, WZ } from '../core/config';
+import { VOXEL, WX, WY, WZ } from '../core/config';
 
 /**
- * Large-scale sky visibility ("heightfield GI"): a coarse 3D grid (one cell per 2x2x2 voxels)
+ * Large-scale sky visibility ("heightfield GI"): a coarse 3D grid (one cell per 0.8 m cube)
  * storing how much open sky each point of the world sees. Built from the column heightfield with
  * horizon-based occlusion in 8 directions plus an overhead cover term, so canopies, roofs, cliffs
  * and bunker interiors all darken the ambient light that reaches them. One trilinear texture fetch
  * per fragment replaces what would otherwise need screen-space AO.
  */
-export const SKY_W = WX >> 1;
-export const SKY_H = WY >> 1;
-export const SKY_D = WZ >> 1;
+/** voxels per sky cell along each axis */
+export const SKY_CELL = Math.round(0.8 / VOXEL);
+export const SKY_W = WX / SKY_CELL;
+export const SKY_H = WY / SKY_CELL;
+export const SKY_D = WZ / SKY_CELL;
+/** voxels per 0.4 m: the tuning below was written in 0.4 m units */
+const U = 0.4 / VOXEL;
 
 const DIRS: [number, number][] = [];
 for (let i = 0; i < 8; i++) {
@@ -24,10 +28,16 @@ function coarseTops(top: Uint8Array) {
   const hmean = new Float32Array(SKY_W * SKY_D);
   for (let i = 0; i < SKY_W; i++)
     for (let j = 0; j < SKY_D; j++) {
-      const x = i * 2, z = j * 2;
-      const a = top[x * WZ + z], b = top[(x + 1) * WZ + z], c = top[x * WZ + z + 1], d = top[(x + 1) * WZ + z + 1];
-      hmax[i * SKY_D + j] = Math.max(a, b, c, d);
-      hmean[i * SKY_D + j] = (a + b + c + d) * 0.25;
+      let mx = 0, sum = 0;
+      for (let a = 0; a < SKY_CELL; a++)
+        for (let b = 0; b < SKY_CELL; b++) {
+          const t = top[(i * SKY_CELL + a) * WZ + j * SKY_CELL + b];
+          if (t > mx) mx = t;
+          sum += t;
+        }
+      // heights in 0.4 m units from here on
+      hmax[i * SKY_D + j] = mx / U;
+      hmean[i * SKY_D + j] = sum / (SKY_CELL * SKY_CELL) / U;
     }
   return { hmax, hmean };
 }
@@ -40,7 +50,7 @@ export function computeSky(top: Uint8Array, out: Uint8Array, i0 = 0, i1 = SKY_W,
   const { hmax, hmean } = coarseTops(top);
   const neigh = new Float32Array(DIRS.length * STEPS.length);
   const dist = new Float32Array(STEPS.length);
-  for (let k = 0; k < STEPS.length; k++) dist[k] = STEPS[k] * 2; // in voxels
+  for (let k = 0; k < STEPS.length; k++) dist[k] = STEPS[k] * 2; // in 0.4 m units
   const layer = SKY_W * SKY_D;
   for (let i = i0; i < i1; i++) {
     for (let j = j0; j < j1; j++) {
@@ -62,7 +72,7 @@ export function computeSky(top: Uint8Array, out: Uint8Array, i0 = 0, i1 = SKY_W,
       const selfMean = hmean[i * SKY_D + j];
       const selfMax = hmax[i * SKY_D + j];
       for (let cy = 0; cy < SKY_H; cy++) {
-        const y = cy * 2 + 1; // cell centre in voxels
+        const y = cy * 2 + 1; // cell centre in 0.4 m units
         let vis = 1;
         if (y < hiAround || y < selfMax) {
           let occ = 0;
