@@ -20,9 +20,9 @@ import { PlayerController } from './Player';
 import { Soldier, WeaponState } from './Soldier';
 import { Loadout, Stats, WEAPON, randomLoadout } from './weapons';
 
-type ProjKind = 'bullet' | 'rocket' | 'grenade' | 'frag' | 'smoke' | 'c4';
+export type ProjKind = 'bullet' | 'rocket' | 'grenade' | 'frag' | 'smoke' | 'c4';
 
-interface Proj {
+export interface Proj {
   kind: ProjKind;
   pos: THREE.Vector3;
   vel: THREE.Vector3;
@@ -40,6 +40,14 @@ interface Proj {
   trailT: number;
   weaponName: string;
   whizzed?: boolean;
+  /** network id of a grenade, rocket or charge (online) */
+  nid: number;
+  /** the shooter's own tag for a shot it predicted, so the host's id can find it */
+  cid: number;
+  /** drawn only: online peers show shots, the host decides what they hit */
+  vis: boolean;
+  /** seconds to rewind targets when testing hits (a lagging peer's shot) */
+  rewind: number;
 }
 
 interface Smoke {
@@ -73,6 +81,48 @@ export interface GameEvents {
   onDamage(x: number, y: number, z: number, amount: number, head: boolean, killed: boolean): void;
 }
 
+/** what happens to one human player, wherever they are playing */
+export interface PlayerEvents {
+  hitMarker(kill: boolean, head: boolean): void;
+  hurt(dir: THREE.Vector3, amount: number, killed: boolean, by: Soldier | null): void;
+  score(label: string, points: number, big?: boolean): void;
+  damage(x: number, y: number, z: number, amount: number, head: boolean, killed: boolean): void;
+  push(vx: number, vy: number, vz: number): void;
+}
+
+/** the online host's side: everything peers need to hear about */
+export interface HostLink {
+  tell(s: Soldier): PlayerEvents | null;
+  shot(s: Soldier, wi: number, seed: number, spread: number, m: THREE.Vector3, d: THREE.Vector3, fp: boolean, nids: number[], cid: number): void;
+  thrown(p: Proj): void;
+  projEnd(p: Proj): void;
+  boom(x: number, y: number, z: number, radius: number): void;
+  smoke(x: number, y: number, z: number): void;
+  feed(e: FeedEntry): void;
+  teamMessage(team: Team, text: string, kind: 'info' | 'warn' | 'good', alarm: boolean): void;
+  spawned(s: Soldier): void;
+  loadout(s: Soldier): void;
+  ended(winner: Team): void;
+  creak(x: number, y: number, z: number, tree: boolean): void;
+  crash(x: number, y: number, z: number, size: number, tree: boolean): void;
+}
+
+/** an online peer's side: what its own player does, sent to the host */
+export interface ClientLink {
+  fire(wi: number, seed: number, spread: number, m: THREE.Vector3, d: THREE.Vector3, cid: number): void;
+  toss(kind: ProjKind, from: THREE.Vector3, vel: THREE.Vector3, cid: number): void;
+  detonate(): void;
+  heal(): void;
+}
+
+/** a person in an online match */
+export interface Human {
+  peer: string;
+  name: string;
+  team: Team;
+  loadout: Loadout;
+}
+
 export type Difficulty = 'recruit' | 'regular' | 'veteran';
 export interface MatchOptions {
   difficulty: Difficulty;
@@ -90,6 +140,7 @@ const tmpU = new THREE.Vector3();
 const hit = newHit();
 const occHit = newHit();
 const tmpQ = new THREE.Quaternion();
+const tmpH = new THREE.Vector3();
 
 export class Game {
   time = 0;
@@ -117,8 +168,15 @@ export class Game {
   timeLeft = MATCH_TIME;
   private brainT = 0;
   private spotT = 0;
-  private alertT = [0, 0];
+  private alertT = [-99, -99, -99, -99];
   private rng = mulberry32(42);
+  /** online host / peer links (both null offline) */
+  host: HostLink | null = null;
+  client: ClientLink | null = null;
+  private nextNid = 1;
+  private nextCid = 1;
+  private nextBotSeed = 0;
+  private botNames: string[] = [];
   feed: FeedEntry[] = [];
   minimapDirty = true;
   readonly rocketGeo = boxes([
@@ -160,22 +218,19 @@ export class Game {
     };
     this.destruction = new Destruction(world, scene, this.particles, this.debris, {
       onBarrel: (x, y, z, size) => this.explode(x, y, z, 3.6 + size * 0.05, 110, 2.2 + Math.min(1.2, size * 0.06), null, 'Fuel barrel'),
-      onTopple: (x, y, z, tree) => this.audio.creak(new THREE.Vector3(x, y, z), tree),
+      onTopple: (x, y, z, tree) => {
+        this.audio.creak(new THREE.Vector3(x, y, z), tree);
+        this.host?.creak(x, y, z, tree);
+      },
       onBodyImpact: (x, y, z, size, minX, minZ, maxX, maxZ, tree) => {
-        const p = new THREE.Vector3(x, y, z);
-        this.audio.crash(p, size, tree);
-        this.addShake(p, Math.min(1.2, size / 500));
+        this.crashFx(x, y, z, size, tree);
+        this.host?.crash(x, y, z, size, tree);
         // crush anyone underneath
         for (const s of this.soldiers) {
           if (!s.alive) continue;
           if (s.pos.x > minX - 0.4 && s.pos.x < maxX + 0.4 && s.pos.z > minZ - 0.4 && s.pos.z < maxZ + 0.4 && Math.abs(s.pos.y - y) < 4) {
             this.damageSoldier(s, tree ? 45 : 70, null, new THREE.Vector3(0, -1, 0), tree ? 'Falling tree' : 'Collapse');
           }
-        }
-        // splash if it fell into water
-        if (y < WATER_Y + 1.5 && y > WATER_Y - 3) {
-          this.particles.splash(x, WATER_Y, z, 24, 1.6);
-          this.renderer.water?.addRipple(x, z, 2.2);
         }
       },
     });
@@ -187,31 +242,47 @@ export class Game {
     }
   }
 
+  /** the sound, shake and splash of a falling piece landing */
+  crashFx(x: number, y: number, z: number, size: number, tree: boolean) {
+    const p = new THREE.Vector3(x, y, z);
+    this.audio.crash(p, size, tree);
+    this.addShake(p, Math.min(1.2, size / 500));
+    // splash if it fell into water
+    if (y < WATER_Y + 1.5 && y > WATER_Y - 3) {
+      this.particles.splash(x, WATER_Y, z, 24, 1.6);
+      this.renderer.water?.addRipple(x, z, 2.2);
+    }
+  }
+
+  /** decides hits, health, cores and the match (offline, or the online host) */
+  get authority() {
+    return this.client === null;
+  }
+
+  get online() {
+    return this.host !== null || this.client !== null;
+  }
+
   // --------------------------------------------------------------------------------- setup
   options: MatchOptions = { difficulty: 'regular', minutes: 15 };
-  private coreScoreAcc = 0;
-  private coreScoreT = 0;
 
-  start(playerName: string, loadout: Loadout, options?: MatchOptions) {
+  start(playerName: string, loadout: Loadout, options?: MatchOptions, setup?: { team: Team; humans: Human[] }) {
     if (options) this.options = options;
     this.timeLeft = this.options.minutes * 60;
-    const scene = this.renderer.scene;
-    const names = [...BOT_NAMES].sort(() => this.rng() - 0.5);
-    this.player = new Soldier(playerName, TEAM_BLUE, true, loadout);
+    this.botNames = [...BOT_NAMES].sort(() => this.rng() - 0.5);
+    const team = setup?.team ?? TEAM_BLUE;
+    this.player = new Soldier(playerName, team, true, loadout);
+    this.player.human = true;
     this.soldiers.push(this.player);
-    const prefs = ['ar', 'dmr', 'lmg', 'smg', 'sniper', 'shotgun', 'minigun', 'ar', 'dmr'];
-    for (let i = 0; i < 9; i++) {
-      const team: Team = i < 4 ? TEAM_BLUE : TEAM_RED;
-      const lo = randomLoadout(this.rng, prefs[i]);
-      const s = new Soldier(names[i], team, false, lo);
-      const b = new Bot(s, this, i * 13 + 5);
-      b.skill = Math.min(1, Math.max(0.15, b.skill + DIFF_SKILL[this.options.difficulty]));
-      // bots shoot looser than their weapon allows, less so the better they are
-      s.spreadMul = 1.9 - b.skill * 0.9;
-      this.soldiers.push(s);
-      this.bots.push(b);
+    for (const h of setup?.humans ?? []) this.soldiers.push(this.makeRemote(h));
+    // bots fill every empty slot of the 5v5
+    const prefs = ['ar', 'dmr', 'lmg', 'smg', 'sniper', 'shotgun', 'minigun', 'ar', 'dmr', 'smg'];
+    let k = 0;
+    for (const t of [TEAM_BLUE, TEAM_RED] as Team[]) {
+      const n = 5 - this.soldiers.filter((s) => s.team === t).length;
+      for (let i = 0; i < n; i++) this.addBot(t, prefs[k++ % prefs.length]);
     }
-    for (const s of this.soldiers) scene.add(s.rig.root);
+    for (const s of this.soldiers) this.renderer.scene.add(s.rig.root);
     // initial roles
     this.assignRoles(true);
     // spawn everyone
@@ -227,6 +298,97 @@ export class Game {
     this.ev.onMessage('Destroy the enemy core. Defend yours.', 'info');
   }
 
+  /** a peer's player as the host keeps it: placed where they say, judged here */
+  private makeRemote(h: Human) {
+    const s = new Soldier(h.name, h.team, false, h.loadout);
+    s.ctl = 'remote';
+    s.peer = h.peer;
+    s.human = true;
+    return s;
+  }
+
+  private addBot(team: Team, prefer?: string) {
+    const used = new Set(this.soldiers.map((s) => s.name));
+    const name = this.botNames.find((n) => !used.has(n)) ?? `Bot ${this.nextBotSeed + 1}`;
+    const s = new Soldier(name, team, false, randomLoadout(this.rng, prefer));
+    const b = new Bot(s, this, this.nextBotSeed++ * 13 + 5);
+    b.skill = Math.min(1, Math.max(0.15, b.skill + DIFF_SKILL[this.options.difficulty]));
+    // bots shoot looser than their weapon allows, less so the better they are
+    s.spreadMul = 1.9 - b.skill * 0.9;
+    this.soldiers.push(s);
+    this.bots.push(b);
+    return s;
+  }
+
+  /** online host: a person drops into a running match, taking a bot's place on their team */
+  addHuman(h: Human) {
+    const bot = this.bots.find((b) => b.s.team === h.team && !b.s.alive) ?? this.bots.find((b) => b.s.team === h.team);
+    if (bot) this.removeSoldier(bot.s);
+    const s = this.makeRemote(h);
+    this.soldiers.push(s);
+    this.renderer.scene.add(s.rig.root);
+    const spawns = this.info.spawns[s.team];
+    const sp = spawns[(Math.random() * spawns.length) | 0];
+    s.respawn(sp.x + (Math.random() - 0.5), this.world.floorAt(sp.x, sp.z) + 0.05, sp.z + (Math.random() - 0.5), this.time);
+    this.assignRoles();
+    return { s, replaced: bot?.s ?? null };
+  }
+
+  /** online host: a person left; a bot takes over their slot */
+  dropHuman(s: Soldier) {
+    this.removeSoldier(s);
+    if (this.soldiers.filter((o) => o.team === s.team).length >= 5) return null;
+    const b = this.addBot(s.team);
+    this.renderer.scene.add(b.rig.root);
+    const spawns = this.info.spawns[b.team];
+    const sp = spawns[(Math.random() * spawns.length) | 0];
+    b.respawn(sp.x, this.world.floorAt(sp.x, sp.z) + 0.05, sp.z, this.time);
+    this.bots[this.bots.length - 1].onRespawn();
+    this.assignRoles();
+    return b;
+  }
+
+  removeSoldier(s: Soldier) {
+    this.soldiers = this.soldiers.filter((o) => o !== s);
+    this.bots = this.bots.filter((b) => b.s !== s);
+    this.renderer.scene.remove(s.rig.root);
+    for (const t of this.intel) t.delete(s.id);
+    for (const o of this.soldiers) {
+      o.damagers.delete(s);
+      if (o.lastAttacker === s) o.lastAttacker = null;
+    }
+    for (const b of this.bots) {
+      b.known.delete(s.id);
+      if (b.target?.s === s) b.target = null;
+    }
+    if (this.pc?.spectate === s) this.pc.spectate = null;
+  }
+
+  /** online peer: the match as the host describes it; everyone but our own player is a puppet */
+  startClient(roster: { id: number; name: string; team: Team; human: boolean; loadout: Loadout; you: boolean }[], options: MatchOptions) {
+    this.options = options;
+    this.timeLeft = options.minutes * 60;
+    this.destruction.puppet = true;
+    for (const r of roster) this.addPuppet(r);
+    this.player ??= this.soldiers[0];
+    this.pc = new PlayerController(this.player, this.input, this);
+    this.viewmodel.setWeapon(this.player);
+    this.running = true;
+    this.ev.onMessage('Destroy the enemy core. Defend yours.', 'info');
+  }
+
+  addPuppet(r: { id: number; name: string; team: Team; human: boolean; loadout: Loadout; you: boolean }) {
+    const s = new Soldier(r.name, r.team, r.you, r.loadout, r.id);
+    s.human = r.human;
+    s.ctl = r.you ? 'sim' : 'puppet';
+    s.alive = false;
+    s.rig.root.visible = false;
+    if (r.you) this.player = s;
+    this.soldiers.push(s);
+    this.renderer.scene.add(s.rig.root);
+    return s;
+  }
+
   private assignRoles(initial = false) {
     for (const team of [TEAM_BLUE, TEAM_RED] as Team[]) {
       const bots = this.bots.filter((b) => b.s.team === team);
@@ -236,7 +398,7 @@ export class Game {
       let defenders = threatened ? 2 : 1;
       if (core.hp < 900) defenders++;
       if (enemyCore.hp < 700 && !threatened) defenders = Math.max(0, defenders - 1);
-      if (team === TEAM_BLUE) defenders = Math.min(defenders, 2);
+      if (team === this.player.team) defenders = Math.min(defenders, 2);
       // keep existing defenders when possible, otherwise pick bots nearest our core
       const sorted = [...bots].sort((a, b) => {
         const ad = a.role === 'defend' ? -1000 : 0, bd = b.role === 'defend' ? -1000 : 0;
@@ -289,13 +451,24 @@ export class Game {
   }
 
   // --------------------------------------------------------------------------------- combat
-  fireWeapon(s: Soldier, w: WeaponState) {
+  /**
+   * A shot leaves the gun. `net` carries a shot decided on another machine: a peer's shot on the host
+   * (judged here, against targets rewound to what that peer saw) or the host's shot replayed on a peer.
+   */
+  fireWeapon(s: Soldier, w: WeaponState, net?: { seed: number; spread: number; m: THREE.Vector3; d: THREE.Vector3; fp: boolean; rewind: number; cid: number; nids?: number[] }) {
     const st = w.stats;
     const def = w.def;
-    s.computeMuzzle();
     const m = s.muzzle;
-    // muzzle inside a wall? fire from the chest instead
-    if (this.world.solidAt(m.x, m.y, m.z)) m.set(s.pos.x, s.pos.y + 1.25, s.pos.z);
+    if (net) {
+      m.copy(net.m);
+      s.aimDir.copy(net.d);
+      s.lastShot = this.time;
+    } else {
+      s.computeMuzzle();
+      // muzzle inside a wall? fire from the chest instead
+      if (this.world.solidAt(m.x, m.y, m.z)) m.set(s.pos.x, s.pos.y + 1.25, s.pos.z);
+    }
+    const fp = s.isPlayer || !!net?.fp;
     this.audio.gunshot(def.id, m, { suppressed: st.suppressed, loud: st.loud, isPlayer: s.isPlayer, left: w.ammo, mag: st.mag, owner: s.pos, valid: () => s.alive && s.weapon === w });
     this.noises.push({ x: m.x, z: m.z, t: this.time, team: s.team, radius: (st.suppressed ? 9 : 42) * st.loud });
     if (!st.suppressed) s.spottedUntil = Math.max(s.spottedUntil, this.time + 1.5);
@@ -309,7 +482,12 @@ export class Game {
       this.particles.muzzle(m.x, m.y, m.z, s.aimDir.x, s.aimDir.z, def.model.bulky ? 1.4 : 1);
       if (Math.random() < 0.5) this.renderer.flashAt(m.x, m.y + 0.2, m.z, def.model.bulky ? 9 : 6, 0xffb060, 0.06);
     }
-    const spread = s.spread() * s.spreadMul;
+    const spread = net ? net.spread : s.spread() * s.spreadMul;
+    // a seeded cone, so every machine draws the same pellets
+    const seed = net ? net.seed : (Math.random() * 0x7fffffff) | 0;
+    const rnd = mulberry32(seed);
+    const cid = net ? net.cid : this.client && s.isPlayer ? this.nextCid++ : 0;
+    const nids: number[] = [];
     s.pelletsFired += st.pellets;
     const right = tmpR.set(s.aimDir.z, 0, -s.aimDir.x);
     if (right.lengthSq() < 1e-6) right.set(1, 0, 0);
@@ -318,17 +496,17 @@ export class Game {
     for (let i = 0; i < st.pellets; i++) {
       tmpD.copy(s.aimDir);
       // gaussian-ish cone around the aim
-      const a = Math.random() * Math.PI * 2;
-      const r = spread * Math.sqrt(Math.random());
+      const a = rnd() * Math.PI * 2;
+      const r = spread * Math.sqrt(rnd());
       tmpD.addScaledVector(right, Math.cos(a) * r).addScaledVector(up, Math.sin(a) * r);
       tmpD.normalize();
       const kind: ProjKind = st.projectile === 'rocket' ? 'rocket' : st.projectile === 'grenade' ? 'grenade' : 'bullet';
       // the player's rockets and grenades appear a little ahead of the eye
-      const start = s.isPlayer && kind !== 'bullet' ? m.clone().addScaledVector(s.aimDir, 0.6).add(tmpV.set(0, -0.12, 0)) : m.clone();
+      const start = fp && kind !== 'bullet' ? m.clone().addScaledVector(s.aimDir, 0.6).add(tmpV.set(0, -0.12, 0)) : m.clone();
       const p: Proj = {
         kind,
         pos: start,
-        vel: tmpD.clone().multiplyScalar(st.velocity * (0.97 + Math.random() * 0.06)),
+        vel: tmpD.clone().multiplyScalar(st.velocity * (0.97 + rnd() * 0.06)),
         owner: s,
         team: s.team,
         stats: st,
@@ -342,9 +520,15 @@ export class Game {
         wet: false,
         trailT: 0,
         weaponName: def.name,
+        nid: 0,
+        cid,
+        vis: !this.authority,
+        rewind: net?.rewind ?? 0,
       };
       if (kind === 'grenade') p.vel.y += 6.5;
       if (kind !== 'bullet') {
+        if (this.host) nids.push((p.nid = this.nextNid++));
+        else if (net?.nids) p.nid = net.nids[nids.push(0) - 1] ?? 0;
         const mesh = new THREE.Mesh(kind === 'rocket' ? this.rocketGeo : this.grenadeGeo, toyMaterial);
         mesh.castShadow = true;
         mesh.position.copy(p.pos);
@@ -357,21 +541,39 @@ export class Game {
       }
       this.projectiles.push(p);
     }
+    const wi = s.weapons.indexOf(w);
+    if (this.host) this.host.shot(s, wi, seed, spread, m, s.aimDir, fp, nids, cid);
+    else if (this.client && s.isPlayer && !net) this.client.fire(wi, seed, spread, m, s.aimDir, cid);
+  }
+
+  /** online peer: the host numbered the grenades and rockets we predicted */
+  bindNids(cid: number, nids: number[]) {
+    let k = 0;
+    for (const p of this.projectiles) if (p.cid === cid && p.owner === this.player && p.kind !== 'bullet' && k < nids.length) p.nid = nids[k++];
+  }
+
+  /** online peer: the host says a grenade, rocket or charge is gone */
+  endProj(nid: number) {
+    for (const p of this.projectiles) if (p.nid === nid && !p.dead) this.kill(p);
   }
 
   useItem(s: Soldier) {
     if (s.item === 'c4' && s.c4.length > 0) {
       // detonate all placed charges
-      for (const p of this.projectiles) if (p.kind === 'c4' && p.owner === s && !p.dead) p.fuse = 0.05;
-      s.c4 = [];
-      this.audio.detonator(s.isPlayer, s.pos);
+      if (this.authority) this.detonateCharges(s);
+      else {
+        s.c4 = [];
+        this.audio.detonator(s.isPlayer, s.pos);
+        if (s.isPlayer) this.client?.detonate();
+      }
       return;
     }
     if (s.itemCount <= 0) return;
     if (s.item === 'medkit') {
       if (s.hp >= 100) return;
       s.itemCount--;
-      s.healLeft = 70;
+      if (this.authority) s.healLeft = 70;
+      else if (s.isPlayer) this.client?.heal();
       this.audio.medkit(s.pos, s.isPlayer);
       this.particles.add.spawn({ x: s.pos.x, y: s.pos.y + 1.2, z: s.pos.z, vy: 1.2, size: 0.5, life: 0.8, r: 0.4, g: 3, b: 0.8 });
       return;
@@ -409,15 +611,33 @@ export class Game {
     this.throwItem(s, from, vel);
   }
 
-  private throwItem(s: Soldier, from: THREE.Vector3, vel: THREE.Vector3) {
-    const kind: ProjKind = s.item === 'frag' ? 'frag' : s.item === 'smoke' ? 'smoke' : 'c4';
+  detonateCharges(s: Soldier) {
+    for (const p of this.projectiles) if (p.kind === 'c4' && p.owner === s && !p.dead) p.fuse = 0.05;
+    s.c4 = [];
+    this.audio.detonator(s.isPlayer, s.pos);
+  }
+
+  /** `net`: a throw from another machine (a peer's on the host, the host's on a peer) */
+  throwItem(s: Soldier, from: THREE.Vector3, vel: THREE.Vector3, kindIn?: ProjKind, net?: { cid: number; nid: number }) {
+    const kind: ProjKind = kindIn ?? (s.item === 'frag' ? 'frag' : s.item === 'smoke' ? 'smoke' : 'c4');
     const mesh = new THREE.Mesh(kind === 'c4' ? this.c4Geo : this.grenadeGeo, toyMaterial);
     mesh.castShadow = true;
     this.renderer.scene.add(mesh);
-    const p: Proj = { kind, pos: from, vel, owner: s, team: s.team, stats: null, dmg: 0, traveled: 0, life: kind === 'c4' ? 240 : 8, fuse: kind === 'frag' ? 2.3 : kind === 'smoke' ? 1.4 : 1e9, mesh, stuck: false, dead: false, wet: false, trailT: 0, weaponName: kind === 'frag' ? 'Frag' : 'Demo Charge' };
+    const p: Proj = {
+      kind, pos: from, vel, owner: s, team: s.team, stats: null, dmg: 0, traveled: 0, life: kind === 'c4' ? 240 : 8, fuse: kind === 'frag' ? 2.3 : kind === 'smoke' ? 1.4 : 1e9, mesh, stuck: false, dead: false, wet: false, trailT: 0, weaponName: kind === 'frag' ? 'Frag' : 'Demo Charge',
+      nid: net?.nid ?? 0, cid: net?.cid ?? 0, vis: !this.authority, rewind: 0,
+    };
     if (kind === 'c4') s.c4.push(mesh);
     this.projectiles.push(p);
     this.audio.throwSnd(s.pos, kind, s.isPlayer);
+    if (this.host) {
+      p.nid = this.nextNid++;
+      this.host.thrown(p);
+    } else if (this.client && s.isPlayer && !net) {
+      p.cid = this.nextCid++;
+      this.client.toss(kind, from, vel, p.cid);
+    }
+    return p;
   }
 
   private hitSoldierRay(p: Proj, dir: THREE.Vector3, len: number) {
@@ -426,7 +646,9 @@ export class Game {
     let headshot = false;
     for (const s of this.soldiers) {
       if (!s.alive || s.team === p.team) continue;
-      const ox = p.pos.x - s.pos.x, oz = p.pos.z - s.pos.z;
+      // a lagging peer aimed at where it saw everyone
+      const at = p.rewind > 0 ? s.posAt(this.time - p.rewind, tmpH) : s.pos;
+      const ox = p.pos.x - at.x, oz = p.pos.z - at.z;
       const a = dir.x * dir.x + dir.z * dir.z;
       if (a < 1e-8) continue;
       const b = 2 * (ox * dir.x + oz * dir.z);
@@ -436,10 +658,10 @@ export class Game {
       const t = (-b - Math.sqrt(disc)) / (2 * a);
       if (t < -0.3 || t > best) continue;
       const y = p.pos.y + dir.y * t;
-      if (y < s.pos.y + 0.05 || y > s.pos.y + 1.85) continue;
+      if (y < at.y + 0.05 || y > at.y + 1.85) continue;
       best = Math.max(0, t);
       target = s;
-      headshot = y > s.pos.y + 1.42;
+      headshot = y > at.y + 1.42;
     }
     return { t: best, s: target, headshot };
   }
@@ -517,7 +739,7 @@ export class Game {
         const m = hit.mat;
         const mk = MATS[m]?.kind ?? 'stone';
         const pt = tmpV.set(hit.px, hit.py, hit.pz);
-        this.destruction.damageVoxel(hit.x, hit.y, hit.z, st.struct * falloff, dir);
+        if (!p.vis) this.destruction.damageVoxel(hit.x, hit.y, hit.z, st.struct * falloff, dir);
         this.impactFx(pt, hit.nx, hit.ny, hit.nz, m, mk);
         if (st.explosive > 0) {
           this.explode(hit.px, hit.py, hit.pz, st.explosive, st.blastDamage, st.voxRadius, p.owner, p.weaponName);
@@ -536,6 +758,15 @@ export class Game {
         this.kill(p);
         return;
       }
+      if (sh.s && sh.t <= coreT && p.vis) {
+        // drawn only: the host decides the damage
+        const hp = tmpV.set(p.pos.x + dir.x * sh.t, p.pos.y + dir.y * sh.t, p.pos.z + dir.z * sh.t);
+        this.audio.flesh(hp);
+        const tc = sh.s.team === 0 ? [0.3, 0.55, 1.4] : [1.4, 0.35, 0.25];
+        for (let i = 0; i < 3; i++) this.particles.add.spawn({ x: hp.x, y: hp.y, z: hp.z, vx: dir.x * 3 + (Math.random() - 0.5) * 3, vy: Math.random() * 3, vz: dir.z * 3 + (Math.random() - 0.5) * 3, size: 0.07, life: 0.25, r: tc[0] * 3, g: tc[1] * 3, b: tc[2] * 3, gravity: 9, stretch: 0.02 });
+        this.kill(p);
+        return;
+      }
       if (sh.s && sh.t <= coreT) {
         let dmg = p.dmg * falloff * (sh.headshot ? 1.5 : 1);
         if (st.explosive > 0) {
@@ -545,7 +776,7 @@ export class Game {
         if (sh.s.alive && sh.s.team !== p.owner.team) p.owner.pelletsHit++;
         const killed = this.damageSoldier(sh.s, dmg, p.owner, dir, p.weaponName, sh.headshot, hp);
         if (st.tracer) sh.s.markedUntil = this.time + 5;
-        if (p.owner.isPlayer) this.ev.onHitMarker(killed, sh.headshot);
+        this.tell(p.owner)?.hitMarker(killed, sh.headshot);
         this.audio.flesh(hp);
         const tc = sh.s.team === 0 ? [0.3, 0.55, 1.4] : [1.4, 0.35, 0.25];
         for (let i = 0; i < 3; i++) this.particles.add.spawn({ x: hp.x, y: hp.y, z: hp.z, vx: dir.x * 3 + (Math.random() - 0.5) * 3, vy: Math.random() * 3, vz: dir.z * 3 + (Math.random() - 0.5) * 3, size: 0.07, life: 0.25, r: tc[0] * 3, g: tc[1] * 3, b: tc[2] * 3, gravity: 9, stretch: 0.02 });
@@ -555,11 +786,13 @@ export class Game {
       }
       if (coreHit) {
         const cp = tmpV.set(p.pos.x + dir.x * coreT, p.pos.y + dir.y * coreT, p.pos.z + dir.z * coreT);
-        this.damageCore(coreHit, p.dmg * 0.55 * falloff, p.owner, cp);
-        if (st.explosive > 0) this.explode(cp.x, cp.y, cp.z, st.explosive, st.blastDamage, st.voxRadius, p.owner, p.weaponName);
+        if (!p.vis) {
+          this.damageCore(coreHit, p.dmg * 0.55 * falloff, p.owner, cp);
+          if (st.explosive > 0) this.explode(cp.x, cp.y, cp.z, st.explosive, st.blastDamage, st.voxRadius, p.owner, p.weaponName);
+          this.tell(p.owner)?.hitMarker(false, false);
+        }
         this.particles.sparks(cp.x, cp.y, cp.z, -dir.x, 0.3, -dir.z, 5, 1.5);
         this.audio.impact(cp, 'metal');
-        if (p.owner.isPlayer) this.ev.onHitMarker(false, false);
         this.kill(p);
         return;
       }
@@ -633,7 +866,7 @@ export class Game {
       if (p.kind === 'rocket' || (p.kind === 'grenade' && p.fuse <= 0)) {
         // rockets fly through thin foliage occasionally
         if (mk === 'leaf' && p.kind === 'rocket' && Math.random() < 0.5) {
-          this.destruction.damageVoxel(hit.x, hit.y, hit.z, 99, dir);
+          if (!p.vis) this.destruction.damageVoxel(hit.x, hit.y, hit.z, 99, dir);
         } else {
           p.pos.set(hit.px - dir.x * 0.1, hit.py - dir.y * 0.1, hit.pz - dir.z * 0.1);
           this.detonate(p);
@@ -684,14 +917,17 @@ export class Game {
   private kill(p: Proj) {
     p.dead = true;
     if (p.mesh) this.renderer.scene.remove(p.mesh);
+    if (p.nid && this.host) this.host.projEnd(p);
   }
 
   private detonate(p: Proj) {
     if (p.dead) return;
     this.kill(p);
+    // a peer only draws it; the host's blast arrives on its own
+    if (p.vis) return;
     if (p.kind === 'smoke') {
-      this.smokes.push({ x: p.pos.x, y: p.pos.y, z: p.pos.z, t: 0, life: 14, emit: 0 });
-      this.audio.smoke(p.pos);
+      this.addSmoke(p.pos.x, p.pos.y, p.pos.z);
+      this.host?.smoke(p.pos.x, p.pos.y, p.pos.z);
       return;
     }
     if (p.kind === 'frag') return this.explode(p.pos.x, p.pos.y + 0.2, p.pos.z, 4.4, 115, 1.9, p.owner, 'Frag');
@@ -703,8 +939,13 @@ export class Game {
     this.explode(p.pos.x, p.pos.y, p.pos.z, st.explosive, st.blastDamage, st.voxRadius, p.owner, p.weaponName);
   }
 
+  addSmoke(x: number, y: number, z: number) {
+    this.smokes.push({ x, y, z, t: 0, life: 14, emit: 0 });
+    this.audio.smoke(new THREE.Vector3(x, y, z));
+  }
+
   explode(x: number, y: number, z: number, radius: number, damage: number, voxR: number, owner: Soldier | null, weapon: string) {
-    const pos = new THREE.Vector3(x, y, z);
+    if (!this.authority) return;
     const big = radius > 2;
     if (voxR > 0) {
       const n = this.destruction.carve(x, y, z, voxR, big ? 110 : 20);
@@ -721,17 +962,29 @@ export class Game {
       if (!this.world.lineOfSight(x, y + 0.2, z, cx, cy, cz)) k *= 0.35;
       const dir = new THREE.Vector3(cx - x, 0, cz - z).normalize();
       const killed = this.damageSoldier(s, damage * k * (s === owner ? 0.5 : 1), owner, dir, weapon);
-      s.vel.x += dir.x * 7 * k;
-      s.vel.z += dir.z * 7 * k;
-      s.vel.y += 4 * k;
-      if (owner?.isPlayer && s !== owner) this.ev.onHitMarker(killed, false);
+      if (s.ctl === 'remote') this.tell(s)?.push(dir.x * 7 * k, 4 * k, dir.z * 7 * k);
+      else {
+        s.vel.x += dir.x * 7 * k;
+        s.vel.z += dir.z * 7 * k;
+        s.vel.y += 4 * k;
+      }
+      if (owner && s !== owner) this.tell(owner)?.hitMarker(killed, false);
     }
+    const pos = new THREE.Vector3(x, y, z);
     for (const c of this.cores) {
       if (owner && c.team === owner.team) continue;
       const d = Math.hypot(c.pos.x - x, c.pos.y + 1.6 - y, c.pos.z - z);
       if (d < radius * 1.35) this.damageCore(c, damage * 1.45 * Math.pow(1 - d / (radius * 1.35), 0.6), owner, pos);
     }
-    // visuals
+    this.explodeFx(x, y, z, radius);
+    this.host?.boom(x, y, z, radius);
+    this.noises.push({ x, z, t: this.time, team: owner ? owner.team : 0, radius: 60 });
+    this.nav.addDanger(x, z, 2, radius + 2);
+  }
+
+  /** fireball, flash, sound, shake and splash */
+  explodeFx(x: number, y: number, z: number, radius: number) {
+    const pos = new THREE.Vector3(x, y, z);
     const gy = this.world.groundBelow(x, y + 0.5, z);
     this.particles.explosion(x, y, z, radius, y - gy < 1.5 ? gy : NaN);
     this.renderer.flashAt(x, y + 0.8, z, 75 * radius, 0xffb060, 0.28);
@@ -742,8 +995,6 @@ export class Game {
       this.renderer.water?.addRipple(x, z, 3);
       this.audio.splash(pos, 2);
     }
-    this.noises.push({ x, z, t: this.time, team: owner ? owner.team : 0, radius: 60 });
-    this.nav.addDanger(x, z, 2, radius + 2);
     this.minimapDirty = true;
   }
 
@@ -767,19 +1018,16 @@ export class Game {
     const hpBefore = s.hp;
     const killed = s.hurt(dmg, from, dir, this.time);
     const dealt = Math.min(hpBefore, dmg);
+    if (killed) s.respawnAt = this.time + RESPAWN_TIME;
     if (from && from !== s) {
       from.damageDealt += dealt;
       s.damagers.set(from, this.time);
-      if (from.isPlayer && dealt > 0) {
+      if (dealt > 0) {
         const p = at ?? tmpV.set(s.pos.x, s.pos.y + 1.4, s.pos.z);
-        this.ev.onDamage(p.x, p.y, p.z, dealt, head, killed);
+        this.tell(from)?.damage(p.x, p.y, p.z, dealt, head, killed);
       }
     }
-    if (s.isPlayer && dmg > 0) {
-      this.audio.hurt(dmg, dir, killed);
-      this.ev.onPlayerHurt(dir, dmg);
-      this.renderer.hurt = Math.min(1, this.renderer.hurt + dmg / 60);
-    }
+    if (dmg > 0) this.tell(s)?.hurt(dir, dmg, killed, from);
     // bots react to being shot
     const bot = this.bots.find((b) => b.s === s);
     if (bot && from && from.team !== s.team) {
@@ -787,25 +1035,66 @@ export class Game {
       if (!bot.target) bot.target = bot.known.get(from.id)!;
     }
     if (killed) {
-      s.respawnAt = this.time + RESPAWN_TIME;
       if (from && from !== s) this.creditKill(from, s, head);
       // everyone else who hurt the victim recently gets an assist
       for (const [att, t] of s.damagers) {
         if (att === from || att.team === s.team || this.time - t > 10) continue;
         att.assists++;
         att.score += 40;
-        if (att.isPlayer) this.ev.onScore('Assist', 40);
+        this.tell(att)?.score('Assist', 40);
       }
       s.damagers.clear();
       s.streak = 0;
       s.multi = 0;
       const e: FeedEntry = { t: this.time, killer: from ? from.name : weapon || 'World', killerTeam: from ? from.team : ((1 - s.team) as Team), victim: s.name, victimTeam: s.team, weapon: from ? weapon : '', special: head ? 'headshot' : undefined };
       if (from === s) e.killer = s.name;
-      this.feed.push(e);
-      this.ev.onKill(e);
-      if (s.isPlayer) this.pc.spectate = from && from !== s ? from : null;
+      this.addFeed(e);
+      this.host?.feed(e);
     }
     return killed;
+  }
+
+  addFeed(e: FeedEntry) {
+    this.feed.push(e);
+    if (this.feed.length > 60) this.feed.shift();
+    this.ev.onKill(e);
+  }
+
+  /** where a human player hears about hits, damage and points (null for bots) */
+  tell(s: Soldier): PlayerEvents | null {
+    if (s === this.player) return this.local;
+    return s.peer && this.host ? this.host.tell(s) : null;
+  }
+
+  private readonly local: PlayerEvents = {
+    hitMarker: (kill, head) => this.ev.onHitMarker(kill, head),
+    hurt: (dir, amount, killed, by) => this.localHurt(dir, amount, killed, by),
+    score: (label, pts, big) => this.ev.onScore(label, pts, big),
+    damage: (x, y, z, v, head, killed) => this.ev.onDamage(x, y, z, v, head, killed),
+    push: (vx, vy, vz) => {
+      this.player.vel.x += vx;
+      this.player.vel.y += vy;
+      this.player.vel.z += vz;
+    },
+  };
+
+  /** our own player was hit: sound, red flash, direction marker, and the death cam's subject */
+  localHurt(dir: THREE.Vector3, amount: number, killed: boolean, by: Soldier | null) {
+    if (amount > 0) {
+      this.audio.hurt(amount, dir, killed);
+      this.ev.onPlayerHurt(dir, amount);
+      this.renderer.hurt = Math.min(1, this.renderer.hurt + amount / 60);
+    }
+    if (killed) this.pc.spectate = by && by !== this.player ? by : null;
+  }
+
+  /** a message for one team (with the base alarm for the bad news) */
+  teamMessage(team: Team, text: string, kind: 'info' | 'warn' | 'good', alarm: boolean) {
+    if (this.player.team === team) {
+      this.ev.onMessage(text, kind);
+      if (alarm) this.audio.alarm();
+    }
+    this.host?.teamMessage(team, text, kind, alarm);
   }
 
   private creditKill(k: Soldier, victim: Soldier, head: boolean) {
@@ -820,22 +1109,23 @@ export class Game {
       pts += 50;
     }
     k.score += pts;
-    if (!k.isPlayer) return;
-    this.ev.onScore(head ? `Headshot · ${victim.name}` : `Eliminated ${victim.name}`, pts);
+    if (!k.human) return;
+    const tell = this.tell(k);
+    tell?.score(head ? `Headshot · ${victim.name}` : `Eliminated ${victim.name}`, pts);
     if (victim.streak >= 3) {
       k.score += 50;
-      this.ev.onScore('Ended a streak', 50);
+      tell?.score('Ended a streak', 50);
     }
     const multi = ['', '', 'Double kill', 'Triple kill', 'Quad kill'][Math.min(k.multi, 4)];
     if (k.multi >= 2) {
       const b = 50 * (k.multi - 1);
       k.score += b;
-      this.ev.onScore(k.multi > 4 ? 'Rampage' : multi, b, true);
+      tell?.score(k.multi > 4 ? 'Rampage' : multi, b, true);
     }
     const streakName: Record<number, string> = { 5: 'Killing spree', 8: 'Rampaging', 12: 'Unstoppable', 16: 'Legendary' };
     if (streakName[k.streak]) {
       k.score += 100;
-      this.ev.onScore(`${streakName[k.streak]} · ${k.streak} in a row`, 100, true);
+      tell?.score(`${streakName[k.streak]} · ${k.streak} in a row`, 100, true);
     }
   }
 
@@ -845,17 +1135,18 @@ export class Game {
     if (from) {
       from.coreDamage += dmg;
       from.score += dmg * 0.5;
-      if (from.isPlayer) this.coreScoreAcc += dmg * 0.5;
+      if (from.human) from.coreScoreAcc += dmg * 0.5;
     }
     const destroyed = c.hit(dmg, this.time, from ? from.pos.x : at.x, from ? from.pos.z : at.z);
-    if (c.team === TEAM_BLUE && this.time - this.alertT[0] > 8) {
-      this.alertT[0] = this.time;
-      this.ev.onMessage('Our core is under attack!', 'warn');
-      this.audio.alarm();
+    // defenders hear their core is under attack; attackers hear it's working
+    if (this.time - this.alertT[c.team] > 8) {
+      this.alertT[c.team] = this.time;
+      this.teamMessage(c.team, 'Our core is under attack!', 'warn', true);
     }
-    if (c.team === TEAM_RED && this.time - this.alertT[1] > 10 && from?.team === TEAM_BLUE) {
-      this.alertT[1] = this.time;
-      this.ev.onMessage('Enemy core taking damage', 'good');
+    const att = (1 - c.team) as Team;
+    if (from?.team === att && this.time - this.alertT[2 + att] > 10) {
+      this.alertT[2 + att] = this.time;
+      this.teamMessage(att, 'Enemy core taking damage', 'good', false);
     }
     if (destroyed) this.coreDestroyed(c);
   }
@@ -865,11 +1156,17 @@ export class Game {
     this.explode(p.x, p.y + 1.6, p.z, 7, 200, 5.5, null, 'Core breach');
     setTimeout(() => this.explode(p.x + 2, p.y + 3, p.z - 1, 5, 0, 3.5, null, ''), 250);
     setTimeout(() => this.explode(p.x - 2, p.y + 2, p.z + 2, 5, 0, 3.5, null, ''), 520);
+    this.coreBurst(c);
+    this.endMatch((1 - c.team) as Team);
+  }
+
+  /** the crystal shatters into team-coloured shards */
+  coreBurst(c: Core) {
+    const p = c.pos;
     for (let i = 0; i < 60; i++) {
       const col = new THREE.Color(c.team === 0 ? 0x3d8bff : 0xff4d3d);
       this.debris.spawn(p.x, p.y + 1.6, p.z, (Math.random() - 0.5) * 18, 6 + Math.random() * 12, (Math.random() - 0.5) * 18, 0.25, col.multiplyScalar(3), 7);
     }
-    this.endMatch((1 - c.team) as Team);
   }
 
   endMatch(winner: Team) {
@@ -877,7 +1174,8 @@ export class Game {
     this.over = true;
     this.winner = winner;
     this.slowmo = 0.25;
-    this.audio.fanfare(winner === TEAM_BLUE);
+    this.audio.fanfare(winner === this.player.team);
+    this.host?.ended(winner);
     setTimeout(() => this.ev.onEnd(winner), 2600);
   }
 
@@ -926,9 +1224,10 @@ export class Game {
   update(rawDt: number) {
     const dt = Math.min(rawDt, 1 / 20) * this.slowmo;
     if (this.over) this.slowmo = Math.min(1, this.slowmo + rawDt * 0.25);
-    this.time += dt;
+    // an online peer's clock follows the host's (set before each update)
+    if (this.authority) this.time += dt;
     if (!this.over) this.timeLeft -= dt;
-    if (this.timeLeft <= 0 && !this.over) {
+    if (this.timeLeft <= 0 && !this.over && this.authority) {
       const a = this.cores[0].hp, b = this.cores[1].hp;
       this.endMatch(a >= b ? TEAM_BLUE : TEAM_RED);
     }
@@ -966,7 +1265,27 @@ export class Game {
     this.debris.update(dt);
     for (const c of this.cores) c.update(dt, this.time);
     this.nav.decay(dt);
+    if (this.authority) this.judge(dt);
 
+    // the player spots what they can see
+    this.spotT -= dt;
+    if (this.spotT <= 0 && this.player.alive) {
+      this.spotT = 0.25;
+      const p = this.player;
+      for (const e of this.soldiers) {
+        if (e.team === p.team || !e.alive) continue;
+        if (Math.hypot(e.pos.x - p.pos.x, e.pos.z - p.pos.z) > 40) continue;
+        if (this.world.lineOfSight(p.pos.x, p.eyeY, p.pos.z, e.pos.x, e.pos.y + CHEST_HEIGHT, e.pos.z)) this.reportSighting(p.team, e);
+      }
+    }
+    this.noises = this.noises.filter((n) => this.time - n.t < 1);
+    this.input.endFrame();
+  }
+
+  /** respawns, team tactics and score tallies: the authority's half of a frame */
+  private judge(dt: number) {
+    // positions over the last moments, for judging lagging peers' shots
+    if (this.host) for (const s of this.soldiers) s.record(this.time);
     // respawns
     for (const s of this.soldiers) {
       if (!s.alive && this.time >= s.respawnAt && !this.over) {
@@ -982,6 +1301,7 @@ export class Game {
           this.pc.spectate = null;
           this.pc.faceEnemyCore();
         }
+        this.host?.spawned(s);
       }
     }
     // team brains
@@ -990,26 +1310,16 @@ export class Game {
       this.brainT = 6;
       this.assignRoles();
     }
-    // the player spots what they can see
-    this.spotT -= dt;
-    if (this.spotT <= 0 && this.player.alive) {
-      this.spotT = 0.25;
-      const p = this.player;
-      for (const e of this.soldiers) {
-        if (e.team === p.team || !e.alive) continue;
-        if (Math.hypot(e.pos.x - p.pos.x, e.pos.z - p.pos.z) > 40) continue;
-        if (this.world.lineOfSight(p.pos.x, p.eyeY, p.pos.z, e.pos.x, e.pos.y + CHEST_HEIGHT, e.pos.z)) this.reportSighting(p.team, e);
+    // core damage points arrive as one tally rather than a toast per bullet
+    for (const s of this.soldiers) {
+      if (!s.human) continue;
+      s.coreScoreT -= dt;
+      if (s.coreScoreT <= 0 && s.coreScoreAcc >= 5) {
+        this.tell(s)?.score('Core damage', Math.round(s.coreScoreAcc));
+        s.coreScoreAcc = 0;
+        s.coreScoreT = 0.8;
       }
     }
-    this.noises = this.noises.filter((n) => this.time - n.t < 1);
-    // core damage points arrive as one tally rather than a toast per bullet
-    this.coreScoreT -= dt;
-    if (this.coreScoreT <= 0 && this.coreScoreAcc >= 5) {
-      this.ev.onScore('Core damage', Math.round(this.coreScoreAcc));
-      this.coreScoreAcc = 0;
-      this.coreScoreT = 0.8;
-    }
-    this.input.endFrame();
   }
 
   private updateSmoke(dt: number) {
