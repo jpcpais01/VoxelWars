@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { MAP_D, MAP_W, WATER_Y } from '../core/config';
-import { BrightShader, CompositeShader, CopyDepthShader, DownCocShader, DownShader, FsPass, UpShader, makePass } from './post';
+import { BrightShader, CompositeShader, CopyDepthShader, DownCocShader, DownShader, FsPass, RaysShader, UpShader, makePass } from './post';
 import { shared } from './shaderlib';
 import { Water } from './water';
 import type { Viewmodel } from './Viewmodel';
@@ -20,6 +20,10 @@ interface QualityDef {
   fxaa: boolean;
   /** re-render the sun's shadow map every N frames (the light matrix stays paired with its map) */
   shadowEvery: number;
+  /** highlights, sky reflections, bounce light and leaf translucency */
+  fancy: boolean;
+  /** light shafts toward the sun */
+  rays: boolean;
 }
 
 export type LightingId = 'morning' | 'golden' | 'overcast';
@@ -39,30 +43,32 @@ interface LightingDef {
   skyHor: number;
   exposure: number;
   shadowRadius: number;
+  /** light shaft strength */
+  rays: number;
 }
 export const LIGHTING: Record<LightingId, LightingDef> = {
   morning: {
     label: 'Morning',
     sunDir: [-0.55, 0.68, 0.48], sun: 0xffe9c9, sunI: 3.25, sky: 0xbcd8ff, ground: 0x627040, hemiI: 1.4,
-    fog: 0x9fbcc4, sunFog: 0xf3d7a6, mist: 1, mistCol: 0xd9e6e4, skyTop: 0x5d9ad6, skyHor: 0xcfe3ea, exposure: 1, shadowRadius: 2.5,
+    fog: 0x9fbcc4, sunFog: 0xf3d7a6, mist: 1, mistCol: 0xd9e6e4, skyTop: 0x5d9ad6, skyHor: 0xcfe3ea, exposure: 1, shadowRadius: 2.5, rays: 0.32,
   },
   golden: {
     label: 'Golden hour',
     sunDir: [-0.78, 0.4, 0.48], sun: 0xffbe7d, sunI: 3.4, sky: 0x9db6e8, ground: 0x6e5a36, hemiI: 1.15,
-    fog: 0xc9a98a, sunFog: 0xffb36b, mist: 1.35, mistCol: 0xf0d2b0, skyTop: 0x6f93cf, skyHor: 0xf6c99a, exposure: 1.06, shadowRadius: 3,
+    fog: 0xc9a98a, sunFog: 0xffb36b, mist: 1.35, mistCol: 0xf0d2b0, skyTop: 0x6f93cf, skyHor: 0xf6c99a, exposure: 1.06, shadowRadius: 3, rays: 0.6,
   },
   overcast: {
     label: 'Overcast',
     sunDir: [-0.3, 0.88, 0.36], sun: 0xe8eef2, sunI: 1.25, sky: 0xc9d6e2, ground: 0x5d6650, hemiI: 2.25,
-    fog: 0x9aa7ad, sunFog: 0xb9c2c4, mist: 1.6, mistCol: 0xc8d2d4, skyTop: 0x8a9aa8, skyHor: 0xc2ccd1, exposure: 1.08, shadowRadius: 6,
+    fog: 0x9aa7ad, sunFog: 0xb9c2c4, mist: 1.6, mistCol: 0xc8d2d4, skyTop: 0x8a9aa8, skyHor: 0xc2ccd1, exposure: 1.08, shadowRadius: 6, rays: 0.12,
   },
 };
 
 export const QUALITY: Record<Quality, QualityDef> = {
-  low: { scale: 0.75, maxDpr: 1, shadow: 1024, bloom: false, dof: false, ssr: false, grass: false, lod: 0.6, fxaa: true, shadowEvery: 2 },
-  medium: { scale: 1, maxDpr: 1.25, shadow: 1536, bloom: true, dof: false, ssr: false, grass: true, lod: 0.8, fxaa: true, shadowEvery: 2 },
-  high: { scale: 1, maxDpr: 1.5, shadow: 2048, bloom: true, dof: true, ssr: true, grass: true, lod: 1, fxaa: true, shadowEvery: 1 },
-  ultra: { scale: 1, maxDpr: 2, shadow: 4096, bloom: true, dof: true, ssr: true, grass: true, lod: 1.4, fxaa: true, shadowEvery: 1 },
+  low: { scale: 0.75, maxDpr: 1, shadow: 1024, bloom: false, dof: false, ssr: false, grass: false, lod: 0.6, fxaa: true, shadowEvery: 2, fancy: false, rays: false },
+  medium: { scale: 1, maxDpr: 1.25, shadow: 1536, bloom: true, dof: false, ssr: false, grass: true, lod: 0.8, fxaa: true, shadowEvery: 2, fancy: true, rays: true },
+  high: { scale: 1, maxDpr: 1.5, shadow: 2048, bloom: true, dof: true, ssr: true, grass: true, lod: 1, fxaa: true, shadowEvery: 1, fancy: true, rays: true },
+  ultra: { scale: 1, maxDpr: 2, shadow: 4096, bloom: true, dof: true, ssr: true, grass: true, lod: 1.4, fxaa: true, shadowEvery: 1, fancy: true, rays: true },
 };
 
 export class Renderer {
@@ -76,7 +82,8 @@ export class Renderer {
   readonly hemi = new THREE.HemisphereLight(0xbcd8ff, 0x627040, 1.4);
   readonly flashes: THREE.PointLight[] = [];
   private flashLife: number[] = [];
-  readonly sunDir = new THREE.Vector3(-0.55, 0.68, 0.48).normalize();
+  /** toward the sun; the same vector the world shaders read */
+  readonly sunDir = shared.uSunDir.value;
   water!: Water;
   /** first-person weapon, drawn into the main buffer after the world */
   viewmodel: Viewmodel | null = null;
@@ -88,6 +95,9 @@ export class Renderer {
   private rtDown!: THREE.WebGLRenderTarget;
   private rtB: THREE.WebGLRenderTarget[] = [];
   private rtU: THREE.WebGLRenderTarget[] = [];
+  private rtRays!: THREE.WebGLRenderTarget;
+  private raysMat;
+  private sunNdc = new THREE.Vector3();
   private fs = new FsPass();
   private copyMat;
   private downMat;
@@ -160,11 +170,15 @@ export class Renderer {
     this.brightMat = makePass(BrightShader, { tColor: { value: null }, uTexel: { value: new THREE.Vector2() }, uThreshold: { value: 1.25 } });
     this.dsMat = makePass(DownShader, { tColor: { value: null }, uTexel: { value: new THREE.Vector2() } });
     this.upMat = makePass(UpShader, { tColor: { value: null }, tBase: { value: null }, uTexel: { value: new THREE.Vector2() }, uWeight: { value: 1 } });
+    this.raysMat = makePass(RaysShader, { tDepth: { value: null }, uSunUv: { value: new THREE.Vector2() }, uAspect: { value: 1 } });
     this.compMat = makePass(CompositeShader, {
       tColor: { value: null },
       tDepth: { value: null },
       tDown: { value: null },
       tBloom: { value: null },
+      tRays: { value: null },
+      uRaysTexel: { value: new THREE.Vector2() },
+      uRays: { value: 0 },
       uTexel: { value: new THREE.Vector2() },
       uDownTexel: { value: new THREE.Vector2() },
       uNear: { value: 0.5 },
@@ -218,6 +232,12 @@ export class Renderer {
     c.uExposure.value = L.exposure;
     c.uSkyTop.value.setHex(L.skyTop);
     c.uSunDisc.value.setHex(L.sun).multiplyScalar(id === 'overcast' ? 0.6 : 14);
+    // what the world shaders need for highlights, reflections and bounce light
+    shared.uSunCol.value.setHex(L.sun).multiplyScalar(L.sunI);
+    shared.uSkyRad.value.setHex(L.sky).multiplyScalar(L.hemiI / Math.PI);
+    shared.uGroundRad.value.setHex(L.ground).multiplyScalar(L.hemiI / Math.PI);
+    // valley floor albedo x sun on the ground, partly shadowed, spread over the hemisphere
+    shared.uBounce.value.setRGB(0.22, 0.24, 0.12).multiply(shared.uSunCol.value).multiplyScalar((Math.max(this.sunDir.y, 0) * 0.75) / Math.PI);
     if (this.water) {
       this.water.uniforms.uSkyTop.value.setHex(L.skyTop);
       this.water.uniforms.uSkyHor.value.setHex(L.skyHor);
@@ -239,6 +259,7 @@ export class Renderer {
       this.sun.shadow.map?.dispose();
       this.sun.shadow.map = null as unknown as THREE.WebGLRenderTarget;
     }
+    shared.uFancy.value = this.q.fancy ? 1 : 0;
     this.dynScale = 1;
     this.resize();
   }
@@ -320,6 +341,7 @@ export class Renderer {
     this.rtDown?.dispose();
     this.rtB.forEach((r) => r.dispose());
     this.rtU.forEach((r) => r.dispose());
+    this.rtRays?.dispose();
     const opt = { type: THREE.HalfFloatType, format: THREE.RGBAFormat, depthBuffer: false, magFilter: THREE.LinearFilter, minFilter: THREE.LinearFilter };
     const depth = new THREE.DepthTexture(w, h);
     depth.type = THREE.UnsignedIntType;
@@ -336,6 +358,7 @@ export class Renderer {
       this.rtB.push(new THREE.WebGLRenderTarget(bw, bh, opt));
       this.rtU.push(new THREE.WebGLRenderTarget(bw, bh, opt));
     }
+    this.rtRays = new THREE.WebGLRenderTarget(Math.max(16, hw >> 1), Math.max(16, hh >> 1), opt);
     shared.uResolution.value.set(w, h);
     this.water?.uniforms.uHalfRes.value.set(hw, hh);
   }
@@ -489,7 +512,29 @@ export class Renderer {
         src = this.rtU[i];
       }
     }
+    // light shafts: only while the sun is ahead of the camera and not far off screen
+    let rays = 0;
+    if (this.q.rays) {
+      const fwd = cam.getWorldDirection(this.sunNdc);
+      const facing = fwd.dot(this.sunDir);
+      if (facing > 0.05) {
+        const ndc = this.sunNdc.copy(cam.position).addScaledVector(this.sunDir, 1000).project(cam);
+        const off = Math.max(Math.abs(ndc.x), Math.abs(ndc.y));
+        const k = THREE.MathUtils.smoothstep(facing, 0.05, 0.4) * (1 - THREE.MathUtils.smoothstep(off, 1.1, 2.4));
+        rays = k * LIGHTING[this.lighting].rays;
+        if (rays > 0.002) {
+          const r = this.raysMat.uniforms;
+          r.tDepth.value = this.rtMain.depthTexture;
+          r.uSunUv.value.set(ndc.x * 0.5 + 0.5, ndc.y * 0.5 + 0.5);
+          r.uAspect.value = cam.aspect;
+          this.fs.run(gl, this.raysMat, this.rtRays);
+        } else rays = 0;
+      }
+    }
     const c = this.compMat.uniforms;
+    c.tRays.value = this.rtRays.texture;
+    c.uRaysTexel.value.set(1 / this.rtRays.width, 1 / this.rtRays.height);
+    c.uRays.value = rays;
     c.tColor.value = this.rtMain.texture;
     c.tDepth.value = this.rtMain.depthTexture;
     c.tDown.value = this.rtDown.texture;

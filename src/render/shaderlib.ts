@@ -18,6 +18,17 @@ export const shared = {
   tSky: { value: null as THREE.Texture | null },
   /** 0 = sky occlusion off (lowest quality), 1 = on */
   uSkyAmt: { value: 1 },
+  /** world-space direction toward the sun (the renderer's sunDir is this vector) */
+  uSunDir: { value: new THREE.Vector3(-0.55, 0.68, 0.48).normalize() },
+  /** sun irradiance: colour x intensity */
+  uSunCol: { value: new THREE.Color(3.25, 2.97, 2.6) },
+  /** sky and ground radiance, as seen in reflections */
+  uSkyRad: { value: new THREE.Color(0.5, 0.6, 0.8) },
+  uGroundRad: { value: new THREE.Color(0.1, 0.12, 0.05) },
+  /** sunlight bounced off the valley floor onto walls and undersides (already divided by pi) */
+  uBounce: { value: new THREE.Color(0, 0, 0) },
+  /** 0 = plain Lambert (lowest quality), 1 = highlights, reflections, bounce and translucency */
+  uFancy: { value: 1 },
 };
 
 const KIND = { ground: 0, stone: 1, wood: 2, leaf: 3, build: 4, metal: 5, soft: 6, glow: 7 };
@@ -99,6 +110,47 @@ void applyCutout(float viewZ, float worldY) {
     if (viewZ < uCutB.z - 1.2 && worldY > uCutH.y) keep = min(keep, smoothstep(0.65, 1.0, r));
   }
   if (keep < 0.999 && keep < bayer4(gl_FragCoord.xy)) discard;
+}
+`;
+
+/**
+ * three's light loop, unchanged except that the sun's shadow term is also kept in sunShadow
+ * so highlights and translucency can respect it. Falls back to 1 if three's chunk changes shape.
+ */
+export const LIGHTS_BEGIN_SHADOW = (() => {
+  const src = THREE.ShaderChunk.lights_fragment_begin;
+  const key = 'directLight.color *= ( directLight.visible && receiveShadow ) ? getShadow( directionalShadowMap[ i ]';
+  const at = src.indexOf(key);
+  if (at < 0) return 'float sunShadow = 1.0;\n#include <lights_fragment_begin>';
+  const end = src.indexOf(';', at);
+  const expr = src.slice(at + 'directLight.color *= '.length, end);
+  return `float sunShadow = 1.0;\n${src.slice(0, at)}sunShadow = ${expr};\ndirectLight.color *= sunShadow${src.slice(end)}`;
+})();
+
+/** Sun highlights and sky reflections on top of the Lambert base. */
+export const GLSL_SHADE = /* glsl */ `
+uniform vec3 uSunDir;
+uniform vec3 uSunCol;
+uniform vec3 uSkyRad;
+uniform vec3 uGroundRad;
+uniform vec3 uBounce;
+uniform float uFancy;
+// normalised Blinn-Phong sun highlight with Schlick fresnel
+vec3 sunSpec(vec3 N, vec3 V, vec3 F0, float shin) {
+  vec3 H = normalize(uSunDir + V);
+  float nh = max(dot(N, H), 0.0);
+  float vh = max(dot(V, H), 0.0);
+  vec3 F = F0 + (1.0 - F0) * pow(1.0 - vh, 5.0);
+  // stand-in for the masking term: faces seen edge-on must not flare
+  float nv = smoothstep(0.0, 0.3, dot(N, V));
+  return F * (pow(nh, shin) * (shin + 8.0) * 0.0398 * max(dot(N, uSunDir), 0.0) * nv) * uSunCol;
+}
+// sky (or ground) in the mirror direction; rough surfaces only catch it at grazing angles
+vec3 envSpec(vec3 N, vec3 V, vec3 F0, float rough) {
+  vec3 R = reflect(-V, N);
+  float nv = max(dot(N, V), 0.0);
+  vec3 F = F0 + (max(vec3(1.0 - rough), F0) - F0) * pow(1.0 - nv, 5.0);
+  return F * mix(uGroundRad, uSkyRad, smoothstep(-0.15, 0.3, R.y));
 }
 `;
 

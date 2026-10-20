@@ -1,11 +1,13 @@
 import * as THREE from 'three';
 import { MAT_COUNT } from '../world/materials';
-import { GLSL_CLOUDS, GLSL_COMMON, GLSL_CUTOUT, GLSL_SKY, shared } from './shaderlib';
+import { GLSL_CLOUDS, GLSL_COMMON, GLSL_CUTOUT, GLSL_SHADE, GLSL_SKY, LIGHTS_BEGIN_SHADOW, shared } from './shaderlib';
 
 /**
  * Voxel surface material: Lambert lighting (sun + hemisphere + shadows) extended with
  * palette lookup, per-voxel colour jitter, bevelled edges, baked AO, cloud shadows,
  * underwater caustics, wind sway on foliage, baked sky visibility and a dithered x-ray cutout.
+ * On top of that: sun highlights and sky reflections per material kind, wet shorelines, warm
+ * sunlight bounced up from the valley floor and light glowing through leaves.
  *
  * Geometry is the packed 8-byte format from the mesher: positions in whole voxels (the mesh
  * transform scales them to metres) and the face index in aData.z, from which the normal is rebuilt.
@@ -78,9 +80,21 @@ vWorldN = normalize(mat3(modelMatrix) * objectNormal);`,
 ${GLSL_COMMON}
 ${GLSL_CLOUDS}
 ${GLSL_SKY}
+${GLSL_SHADE}
 ${cut ? GLSL_CUTOUT : ''}
 uniform float uTime;
 uniform float uWaterY;
+// per kind: x = highlight strength, y = shininess, z = roughness for sky reflections, w = metalness
+const vec4 KSPEC[8] = vec4[8](
+  vec4(0.22, 10.0, 0.92, 0.0), // ground
+  vec4(0.55, 24.0, 0.75, 0.0), // stone
+  vec4(0.3, 14.0, 0.85, 0.0), // wood
+  vec4(0.6, 28.0, 0.86, 0.0), // leaf: waxy glints
+  vec4(0.7, 40.0, 0.6, 0.0), // build: paint, tiles, concrete
+  vec4(1.0, 80.0, 0.38, 0.8), // metal
+  vec4(0.12, 8.0, 0.95, 0.0), // soft
+  vec4(0.0, 8.0, 1.0, 0.0) // glow
+);
 uniform vec4 uPalette[${MAT_COUNT}];
 uniform vec4 uMatParams[${MAT_COUNT}];
 varying vec3 vVoxPos;
@@ -140,15 +154,50 @@ col *= 1.0 + (1.0 - smoothstep(0.0, 0.05, ed)) * top * prm.x * 0.25 * bevK;
 diffuseColor.rgb = col;
 `,
       )
+      .replace('#include <lights_fragment_begin>', LIGHTS_BEGIN_SHADOW)
       .replace(
         '#include <aomap_fragment>',
         `
 float ao = vAO;
 ao = 0.32 + 0.68 * ao;
-float sky = skyVis(vWorldP, normalize(vWorldN));
+vec3 wN = normalize(vWorldN);
+float sky = skyVis(vWorldP, wN);
+float cloud = cloudShadow(vWorldP.xz, uTime);
+vec3 alb = diffuseColor.rgb;
+if (uFancy > 0.0) {
+  // warm sunlight bounced off the valley floor fills walls, overhangs and undersides
+  reflectedLight.indirectDiffuse += alb * uBounce * (0.5 - 0.5 * wN.y) * cloud * mix(0.25, 1.0, sky);
+}
 reflectedLight.indirectDiffuse *= ao * sky;
 reflectedLight.directDiffuse *= mix(1.0, ao, 0.3) * mix(0.82, 1.0, sky);
-reflectedLight.directDiffuse *= cloudShadow(vWorldP.xz, uTime);
+reflectedLight.directDiffuse *= cloud;
+if (uFancy > 0.0 && vWorldP.y >= uWaterY) {
+  vec3 V = normalize(cameraPosition - vWorldP);
+  vec4 ks = KSPEC[kind];
+  float shin = ks.y, rough = ks.z, str = ks.x;
+  // the shoreline is wet: darker, and glossy enough to mirror the sky
+  float wet = (kind <= 1) ? 1.0 - smoothstep(0.05, 0.6, vWorldP.y - uWaterY) : 0.0;
+  reflectedLight.directDiffuse *= 1.0 - wet * 0.4;
+  reflectedLight.indirectDiffuse *= 1.0 - wet * 0.4;
+  shin = mix(shin, 60.0, wet);
+  rough = mix(rough, 0.25, wet);
+  str = mix(str, 1.0, wet);
+  // metals keep little diffuse light and tint what they reflect
+  reflectedLight.directDiffuse *= 1.0 - ks.w * 0.45;
+  reflectedLight.indirectDiffuse *= 1.0 - ks.w * 0.3;
+  vec3 F0 = mix(vec3(0.04), alb, ks.w);
+  // per-voxel variation so flat faces glint unevenly
+  str *= 0.6 + 0.8 * h;
+  totalEmissiveRadiance += sunSpec(wN, V, F0, shin) * (str * sunShadow * cloud * mix(0.5, 1.0, sky));
+  totalEmissiveRadiance += envSpec(wN, V, F0, rough) * (ao * sky * (0.4 + 0.6 * str));
+  if (kind == 3) {
+    // sunlight glowing through the leaves, strongest when looking toward the sun
+    float back = pow(max(dot(-V, uSunDir), 0.0), 4.0);
+    float thru = 0.2 + 0.8 * max(-dot(wN, uSunDir), 0.0);
+    float tr = (0.03 + back * 0.8) * thru * sky * sky * cloud * ao;
+    totalEmissiveRadiance += alb * vec3(1.05, 1.2, 0.55) * uSunCol * (tr * 0.2);
+  }
+}
 if (vWorldP.y < uWaterY) {
   float depth = uWaterY - vWorldP.y;
   float c = caustics(vWorldP.xz, uTime);
@@ -213,20 +262,29 @@ vWorldP = (modelMatrix * vec4(transformed, 1.0)).xyz;`,
 ${GLSL_COMMON}
 ${GLSL_CLOUDS}
 ${GLSL_SKY}
+${GLSL_SHADE}
 uniform float uTime;
 varying vec3 vGCol;
 varying float vGW;
 varying vec3 vWorldP;`,
       )
       .replace('#include <color_fragment>', `diffuseColor.rgb = vGCol;`)
+      .replace('#include <lights_fragment_begin>', LIGHTS_BEGIN_SHADOW)
       .replace(
         '#include <aomap_fragment>',
         `
 float ao = mix(0.62, 1.0, vGW);
 float sky = skyVis(vWorldP, vec3(0.0, 1.0, 0.0));
+float cloud = cloudShadow(vWorldP.xz, uTime);
 reflectedLight.indirectDiffuse *= ao * sky;
-reflectedLight.directDiffuse *= mix(0.7, 1.0, vGW) * cloudShadow(vWorldP.xz, uTime);
+reflectedLight.directDiffuse *= mix(0.7, 1.0, vGW) * cloud;
 totalEmissiveRadiance += vGCol * 0.12 * vGW * sky;
+if (uFancy > 0.0) {
+  // backlit blade tips glow when the sun is in front of you
+  vec3 V = normalize(cameraPosition - vWorldP);
+  float back = pow(max(dot(-V, uSunDir), 0.0), 3.0);
+  totalEmissiveRadiance += vGCol * vec3(1.05, 1.15, 0.5) * uSunCol * ((0.04 + back * 0.4) * vGW * sky * cloud * sunShadow * 0.3);
+}
 `,
       );
   };
