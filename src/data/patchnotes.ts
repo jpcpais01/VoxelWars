@@ -8,7 +8,7 @@ export interface PatchGroup {
 export const PATCH_NOTES: PatchGroup[] = [
   {
     hour: '2026-10-20 · 20:00 UTC',
-    title: 'Full Screen',
+    title: 'Bigger Blasts',
     entries: [
       'Bigger, better blasts: a white-hot flash, a fireball that bursts outward and burns down to embers, a hot shock ring, streaking sparks and a ring of dust thrown off the ground, with much less smoke hanging around afterwards. Craters are no longer perfect balls either: every blast tears a lumpy, irregular hole, blasts on the ground dig wide shallow bowls, wood and leaves give way further than stone and steel, and loose bits crumble off the rim.',
       'New fullscreen button in the top-right corner of the menus and the pause screen; on phones it also turns the game sideways. Fixed: after a refused mouse capture (most often resuming right after Esc), looking around no longer stops at the edge of the screen, which was easiest to hit in F11 fullscreen. The game now shows Click to aim and captures the mouse on your next click.',
