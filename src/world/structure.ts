@@ -21,6 +21,9 @@ export const COMP = new Float32Array(256);
 export const TENS = new Float32Array(256);
 export const SHEAR = new Float32Array(256);
 export const LEAF = new Uint8Array(256);
+/** wood, and the foliage trees grow (not bushes, ferns or ivy) */
+export const WOOD = new Uint8Array(256);
+export const CROWN = new Uint8Array(256);
 /** indestructible materials (bedrock) hold everything they touch */
 export const FIXED = new Uint8Array(256);
 
@@ -31,6 +34,8 @@ export const FIXED = new Uint8Array(256);
   MATS.forEach((d, i) => {
     if (!d) return;
     if (i > 0 && d.hp <= 0) FIXED[i] = 1;
+    if (d.kind === 'wood') WOOD[i] = 1;
+    if (d.kind === 'leaf' && !/bush|fern/.test(d.name)) CROWN[i] = 1;
     switch (d.kind) {
       case 'stone': set(i, 1, 320, 60, 70); break;
       case 'ground': set(i, 0.85, 150, 5, 15); break;
@@ -71,6 +76,8 @@ export interface StructJob {
   removed: Int16Array;
   /** local x,y,z of rubble that just landed: only checked for being loose */
   rubble: Int16Array;
+  /** 1 where a voxel is settled rubble: a heap holds itself up, so only the loose check sees it */
+  rubbleMask: Uint8Array;
 }
 
 export const enum Fail {
@@ -160,7 +167,7 @@ interface Part {
 }
 
 export function solveStructure(job: StructJob): StructResult {
-  const { sx, sz, vox, ground } = job;
+  const { sx, sz, vox, ground, rubbleMask } = job;
   const N = sx * sz * WY;
   const S = scratch;
   S.ensure(N);
@@ -212,18 +219,36 @@ export function solveStructure(job: StructJob): StructResult {
   };
 
   // ------------------------------------------------------------------ leaves: who carries them
+  // Tree foliage goes to the nearest wood it can reach through leaves first, so a crown leaning on
+  // a wall still belongs to its tree; whatever's left (bushes, ivy, loose clumps) goes to the
+  // nearest solid voxel of any kind.
   const leafList: number[] = [];
   {
     const q: number[] = [];
+    const spread = (from: number, onlyCrown: boolean) => {
+      for (let h = from; h < q.length; h++) {
+        const i = q[h];
+        for (const o of offs) {
+          if (!inBox(i, o)) continue;
+          const n = i + o;
+          const m = vox[n];
+          if (LEAF[m] !== 1 || owner[n] >= 0 || (onlyCrown && CROWN[m] !== 1)) continue;
+          owner[n] = owner[i];
+          q.push(n);
+        }
+      }
+    };
     for (let col = 0; col < sx * sz; col++) {
       const base = col * WY;
       for (let y = 1; y < WY - 1; y++) {
         const i = base + y;
-        if (LEAF[vox[i]] !== 1) continue;
+        const m = vox[i];
+        if (LEAF[m] !== 1) continue;
         leafList.push(i);
+        if (CROWN[m] !== 1) continue;
         for (const o of offs) {
           if (!inBox(i, o)) continue;
-          if (solid(i + o)) {
+          if (WOOD[vox[i + o]] === 1) {
             owner[i] = i + o;
             q.push(i);
             break;
@@ -231,16 +256,20 @@ export function solveStructure(job: StructJob): StructResult {
         }
       }
     }
-    for (let h = 0; h < q.length; h++) {
-      const i = q[h];
+    spread(0, true);
+    const start = q.length;
+    for (const i of leafList) {
+      if (owner[i] >= 0) continue;
       for (const o of offs) {
         if (!inBox(i, o)) continue;
-        const n = i + o;
-        if (LEAF[vox[n]] !== 1 || owner[n] >= 0) continue;
-        owner[n] = owner[i];
-        q.push(n);
+        if (solid(i + o)) {
+          owner[i] = i + o;
+          q.push(i);
+          break;
+        }
       }
     }
+    spread(start, false);
     for (const l of leafList) if (owner[l] >= 0) extra[owner[l]] += MASS[vox[l]];
     work += leafList.length;
   }
@@ -307,7 +336,7 @@ export function solveStructure(job: StructJob): StructResult {
         if (nx < 0 || nz < 0 || nx >= sx || nz >= sz || ny < 0 || ny >= WY) continue;
         const n = i + nb.o;
         const nm = vox[n];
-        if (nm === 0 || LEAF[nm] === 1) continue;
+        if (nm === 0 || LEAF[nm] === 1 || (axis >= 0 && rubbleMask[n] === 1)) continue;
         if (c === edge && (axis === 1 ? nb.dy : axis === 0 ? nb.dx : nb.dz) === across) {
           // the neighbour across the plane is support, not part of the piece
           if (axis === 1) {
@@ -522,7 +551,7 @@ export function solveStructure(job: StructJob): StructResult {
     const tryPlane = (axis: number, side: number, L: number) => {
       const pass = S.nextStamp();
       for (const s of live) {
-        if (vox[s] === 0 || LEAF[vox[s]] === 1 || stamp[s] > pass) continue;
+        if (vox[s] === 0 || LEAF[vox[s]] === 1 || rubbleMask[s] === 1 || stamp[s] > pass) continue;
         const c = coord(s, axis);
         if (side > 0 ? c < L : c >= L) continue;
         if (!explore(s, axis, side, L, pass)) continue;
