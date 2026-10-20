@@ -7,6 +7,14 @@ export interface PatchGroup {
 
 export const PATCH_NOTES: PatchGroup[] = [
   {
+    hour: '2026-10-20 · 22:00 UTC',
+    title: 'Squad Up',
+    entries: [
+      'Online multiplayer is here. Hit Play online in the main menu, pick a name and either Quick match into an open squad, create a room and send friends its five-letter code or invite link, or type in a code you were sent. In the lobby everyone picks Blue or Red, the host sets difficulty, time of day and match length, and bots fill every empty slot so it is always a full 5v5, from one friend up to ten players. Friends can also jump into a match already in progress: a bot steps aside for them, and steps back in if someone leaves.',
+      'Everything you do is shared: shots, grenades, C4, smoke, medkits, kills, the killfeed, core damage and the end of the match. Every crater, every toppled tree and every collapsing tower falls the same way for everyone, and late joiners see the valley exactly as it stands. Your own movement and shots feel instant, and hits are judged against where your target was on your screen, so you do not have to lead for lag. Your ping shows on the left of the screen. Matches run straight between players with no game server, so a few strict school or office networks may not connect.',
+    ],
+  },
+  {
     hour: '2026-10-20 · 21:00 UTC',
     title: 'Things Fall Down, Light Pours In',
     entries: [

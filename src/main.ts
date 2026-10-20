@@ -16,6 +16,11 @@ import { LoadoutEditor } from './ui/Loadout';
 import { ITEMS, WEAPON } from './game/weapons';
 import { PATCH_NOTES } from './data/patchnotes';
 import { shared } from './render/shaderlib';
+import { OnlineUI } from './ui/Online';
+import { keepParams } from './net/link';
+import type { HostSession } from './net/host';
+import type { PeerSession } from './net/peer';
+import type { Welcome } from './net/session';
 
 registerSW({ immediate: true });
 
@@ -142,6 +147,33 @@ let chunks: ChunkManager;
 let game: Game;
 let hud: HUD | null = null;
 const editor = new LoadoutEditor();
+const online = new OnlineUI({
+  loadout: () => JSON.parse(JSON.stringify(editor.loadout)),
+  settings: () => ({ difficulty: settings.difficulty, minutes: settings.minutes, lighting: settings.lighting }),
+  saveSettings: (m) => {
+    settings.difficulty = m.difficulty;
+    settings.minutes = m.minutes;
+    settings.lighting = m.lighting;
+    renderer.setLighting(m.lighting);
+    saveSettings();
+    syncSetup();
+  },
+  hostStart: (s) => deployHost(s),
+  peerWelcome: (s, w) => joinMatch(s, w),
+  peerReady: () => enterMatch(),
+  openLoadout: () => {
+    // the editor opens over the menu; the lobby comes back when it closes
+    $('online').classList.remove('open');
+    lobbyLoadout = true;
+    openLoadout();
+  },
+  click: () => audio.uiClick(),
+  shown: () => syncPauseOverlay(),
+  lost: (reason) => connectionLost(reason),
+});
+/** the live online session, once a match is running */
+let net: HostSession | PeerSession | null = null;
+let lobbyLoadout = false;
 
 type State = 'loading' | 'menu' | 'playing';
 let state: State = 'loading';
@@ -205,9 +237,16 @@ async function boot() {
   $('menu').classList.remove('hidden');
   renderMenuKit();
   renderCareer();
-  if (new URLSearchParams(location.search).has('deploy')) {
+  const qs = new URLSearchParams(location.search);
+  if (qs.has('deploy')) {
     history.replaceState(null, '', location.pathname + location.search.replace(/[?&]deploy(=1)?/, '').replace(/^&/, '?'));
     deploy();
+  } else if (qs.get('room') || qs.get('host')) {
+    // an invite link (or a rematch reload): straight into that room's lobby
+    const room = qs.get('room'), host = qs.get('host');
+    online.show();
+    if (host) void online.host(host.toUpperCase(), qs.has('pub'), 'Rematch room open. Your squad is reloading into it.');
+    else void online.join(room!.toUpperCase());
   }
 }
 
@@ -363,6 +402,11 @@ function openLoadout() {
 }
 editor.onClose = (l) => {
   renderMenuKit();
+  online.loadoutChanged(JSON.parse(JSON.stringify(l)));
+  if (lobbyLoadout) {
+    lobbyLoadout = false;
+    if (state === 'menu') $('online').classList.add('open');
+  }
   if (state === 'playing') {
     game.player.pendingLoadout = JSON.parse(JSON.stringify(l));
     if (!game.player.alive) hud?.message('New loadout ready for your next deploy', 'good');
@@ -458,6 +502,10 @@ document.addEventListener('pointerover', (e) => {
 });
 
 $('btn-deploy').addEventListener('click', () => deploy());
+$('btn-online').addEventListener('click', () => {
+  unlockAudio();
+  online.show();
+});
 $('btn-loadout').addEventListener('click', openLoadout);
 $('btn-settings').addEventListener('click', () => openPanel('settings'));
 $('btn-patch').addEventListener('click', () => openPanel('patch'));
@@ -466,16 +514,39 @@ $('btn-help').addEventListener('click', () => openPanel('help'));
 $('p-resume').addEventListener('click', () => setPaused(false));
 $('p-loadout').addEventListener('click', openLoadout);
 $('p-settings').addEventListener('click', () => openPanel('settings'));
-$('p-quit').addEventListener('click', () => location.reload());
+$('p-quit').addEventListener('click', () => quitToMenu());
 $('respawn-loadout').addEventListener('click', openLoadout);
 $('e-again').addEventListener('click', () => {
-  location.href = `${location.pathname}?deploy=1`;
+  if (net?.role === 'host') {
+    // everyone reloads into this room's lobby for another round
+    net.rematch();
+    const pub = net.info?.isPublic ? '&pub=1' : '';
+    setTimeout(() => (location.href = `${location.pathname}?host=${net!.code}${pub}${keepParams()}`), 250);
+  } else if (!net) location.href = `${location.pathname}?deploy=1`;
 });
 $('e-loadout').addEventListener('click', openLoadout);
-$('e-menu').addEventListener('click', () => location.reload());
+$('e-menu').addEventListener('click', () => quitToMenu());
+$('netmsg-ok').addEventListener('click', () => quitToMenu());
+
+function quitToMenu() {
+  online.leave();
+  location.href = `${location.pathname}${keepParams().replace('&', '?')}`;
+}
+
+/** the online match dropped (host left, connection lost) */
+function connectionLost(reason: string) {
+  $('netmsg-title').textContent = 'Match over';
+  $('netmsg-text').textContent = reason;
+  $('netmsg').classList.add('open');
+  paused = false;
+  syncPauseOverlay();
+  if (game) game.over = true;
+  refreshInputEnabled();
+}
 
 function setPaused(p: boolean) {
   if (state !== 'playing' || game.over) return;
+  // online the match keeps running underneath the menu
   paused = p;
   audio.setPaused(p);
   syncPauseOverlay();
@@ -495,6 +566,9 @@ window.addEventListener('keydown', (e) => {
   if (editor.isOpen) editor.close();
   else if ($('settings').classList.contains('open')) closePanel('settings');
   else setPaused(!paused);
+});
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Escape' && state === 'menu' && online.isOpen && !editor.isOpen) online.hide();
 });
 document.addEventListener('visibilitychange', () => {
   audio.setHidden(document.hidden);
@@ -538,23 +612,58 @@ document.querySelectorAll<HTMLElement>('[data-tap]').forEach((b) => {
 // ------------------------------------------------------------------------------------ match
 function deploy() {
   if (state !== 'menu') return;
+  game.start('You', JSON.parse(JSON.stringify(editor.loadout)), { difficulty: settings.difficulty, minutes: settings.minutes });
+  enterMatch();
+}
+
+/** online host: start the match with everyone in the lobby, bots in every empty slot */
+function deployHost(s: HostSession) {
+  if (state !== 'menu') return;
+  const m = s.info.settings;
+  renderer.setLighting(m.lighting);
+  game.start(s.name, JSON.parse(JSON.stringify(editor.loadout)), { difficulty: m.difficulty, minutes: m.minutes }, { team: s.team, humans: s.lobbyHumans() });
+  s.begin(game);
+  net = s;
+  enterMatch();
+}
+
+/** online peer: the host let us in; build the match as it describes it (we deploy once the world is caught up) */
+function joinMatch(s: PeerSession, w: Welcome) {
+  if (state !== 'menu' || net) return;
+  renderer.setLighting(w.settings.lighting);
+  game.startClient(
+    w.roster.map((r) => ({ ...r, you: r.id === w.you })),
+    { difficulty: w.settings.difficulty, minutes: w.settings.minutes },
+  );
+  s.begin(game);
+  net = s;
+}
+
+function enterMatch() {
+  if (state !== 'menu') return;
   unlockAudio();
   audio.deploy();
   state = 'playing';
+  online.inMatch = !!net;
+  $('online').classList.remove('open');
   $('menu').classList.add('hidden');
   $('hud').classList.remove('hidden');
   renderer.shadowForce = true;
   renderer.tiltShift = false;
-  game.start('You', JSON.parse(JSON.stringify(editor.loadout)), { difficulty: settings.difficulty, minutes: settings.minutes });
   hud = new HUD(game);
   applySettings();
   refreshInputEnabled();
-  hud.message('Destroy the red core. Protect yours.', 'info');
+  hud.message(`Destroy the ${game.player.team === TEAM_BLUE ? 'red' : 'blue'} core. Protect yours.`, 'info');
+  if (net) {
+    $('p-quit').textContent = 'Leave match';
+    $('e-again').textContent = net.role === 'host' ? 'Rematch (everyone)' : 'Waiting for host';
+    ($('e-again') as HTMLButtonElement).disabled = net.role !== 'host';
+  }
 }
 
 function showEnd(winner: Team) {
-  const win = winner === TEAM_BLUE;
   const p = game.player;
+  const win = winner === p.team;
   const all = [...game.soldiers];
   const byScore = [...all].sort((a, b) => b.score - a.score);
   const mvp = byScore[0];
@@ -659,16 +768,61 @@ function frame(now: number) {
     game.particles.update(dt);
     chunks.update(dt);
   } else if (state === 'playing') {
-    if (!paused) {
-      game.update(dt);
+    // online the match never pauses: the menu just covers it
+    if (!paused || net) {
+      step(dt);
       game.updateView(dt);
       hud!.update(dt, input.mouseX, input.mouseY, input.touch);
+      netBadge(dt);
     }
   }
   game.particles.depthTex.value = renderer.halfTex;
   renderer.render(paused ? 0 : dt, time);
   renderer.adapt(dt);
 }
+
+/** one simulation step, with the online session around it */
+function step(dt: number) {
+  // the host's clock is everyone's clock: a slow frame takes two steps rather than slowing the match
+  const n = net?.role === 'host' ? Math.ceil(dt / (1 / 20) - 1e-6) : 1;
+  for (let i = 0; i < n; i++) {
+    net?.pre(dt / n);
+    game.update(dt / n);
+    net?.post(dt / n);
+  }
+}
+
+let badgeT = 0;
+function netBadge(dt: number) {
+  badgeT -= dt;
+  if (badgeT > 0) return;
+  badgeT = 0.5;
+  const el = $('net-badge');
+  if (!net) return void (el.textContent = '');
+  const humans = game.soldiers.filter((s) => s.human).length;
+  if (net.role === 'host') {
+    el.textContent = `Hosting ${net.code} · ${humans} ${humans === 1 ? 'player' : 'players'}`;
+    el.className = '';
+  } else {
+    el.textContent = `${net.code} · ${net.ping} ms`;
+    el.className = net.ping > 220 ? 'bad' : net.ping > 120 ? 'slow' : '';
+  }
+}
+
+// a hidden tab gets no animation frames; an online match still has to run (the host runs it for everyone)
+const ticker = new Worker(URL.createObjectURL(new Blob(['setInterval(() => postMessage(0), 40)'], { type: 'text/javascript' })));
+let hiddenLast = performance.now();
+ticker.onmessage = () => {
+  const now = performance.now();
+  const dt = Math.min(0.1, (now - hiddenLast) / 1000);
+  hiddenLast = now;
+  if (!document.hidden || state !== 'playing' || !net) return;
+  step(dt);
+  last = now;
+};
+
+// closing the tab tells the room at once, rather than after a timeout
+window.addEventListener('pagehide', () => online.session?.leave());
 
 window.addEventListener('resize', () => renderer.resize());
 requestAnimationFrame(frame);

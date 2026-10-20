@@ -33,6 +33,10 @@ export class World {
   readonly dirtyChunks = new Set<number>();
   readonly changedColumns = new Set<number>();
   version = 0;
+  /** every runtime edit is reported here (the online host relays them to its peers) */
+  onEdit: ((i: number, m: number, quiet: boolean) => void) | null = null;
+  /** edits made while this is set move voxels rather than break them (no debris on the far side) */
+  quiet = false;
 
   idx(x: number, y: number, z: number) {
     return (x * WZ + z) * WY + y;
@@ -62,6 +66,7 @@ export class World {
     if (this.vox[i] === m) return;
     this.vox[i] = m;
     this.damage.delete(i);
+    if (this.onEdit) this.onEdit(i, m, this.quiet);
     this.markDirty(x, z);
     this.changedColumns.add(x * WZ + z);
   }

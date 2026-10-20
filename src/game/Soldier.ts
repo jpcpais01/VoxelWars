@@ -45,8 +45,27 @@ export interface Intent {
 
 let NEXT_ID = 1;
 
+/** sim: moved by its own physics here · remote: a peer's player on the host, placed where that peer reports · puppet: on a peer, placed from the host's snapshots */
+export type Control = 'sim' | 'remote' | 'puppet';
+
+/** lag compensation keeps this much history (seconds) */
+const HIST = 48;
+
 export class Soldier {
-  readonly id = NEXT_ID++;
+  readonly id: number;
+  ctl: Control = 'sim';
+  /** network peer that plays this soldier, if any */
+  peer: string | null = null;
+  /** a person rather than a bot (on any machine) */
+  human = false;
+  /** spawn counter: a peer's reports from an earlier life are ignored */
+  life = 0;
+  /** core damage points not yet announced */
+  coreScoreAcc = 0;
+  coreScoreT = 0;
+  private hist = new Float32Array(HIST * 4);
+  private histN = 0;
+  private histI = 0;
   readonly pos = new THREE.Vector3();
   readonly vel = new THREE.Vector3();
   yaw = 0;
@@ -109,7 +128,10 @@ export class Soldier {
     public team: Team,
     public isPlayer: boolean,
     loadout: Loadout,
+    id?: number,
   ) {
+    this.id = id ?? NEXT_ID++;
+    if (id !== undefined) NEXT_ID = Math.max(NEXT_ID, id + 1);
     this.rig = buildSoldier(team, isPlayer);
     this.applyLoadout(loadout);
   }
@@ -193,6 +215,10 @@ export class Soldier {
       this.updateDead(game, dt);
       return;
     }
+    if (this.ctl !== 'sim') {
+      this.follow(game, dt);
+      return;
+    }
     const it = this.intent;
     const world = game.world;
     const w = this.weapon;
@@ -224,36 +250,9 @@ export class Soldier {
     this.move(game, dt);
 
     this.waterDepth = Math.max(0, WATER_Y - this.pos.y);
-
-    // footsteps / wading
-    const hs = Math.hypot(this.vel.x, this.vel.z);
-    if (hs > 0.5 && this.onGround) {
-      this.walkPhase += dt * hs * 2.4;
-      this.footT -= dt * hs;
-      if (this.footT <= 0) {
-        this.footT = 1.7;
-        if (this.waterDepth > 0.05) {
-          game.renderer.water?.addRipple(this.pos.x, this.pos.z, 0.6);
-          game.particles.splash(this.pos.x, WATER_Y, this.pos.z, 3, 0.4);
-          game.audio.splash(this.pos, 0.3);
-        } else game.audio.foot(this.pos, 1, this.groundMat(game), this.isPlayer, this.sprinting);
-      }
-    } else this.walkPhase *= Math.exp(-dt * 6);
-    if (this.waterDepth > 0.05 && hs < 0.5) {
-      this.rippleT -= dt;
-      if (this.rippleT < 0) {
-        this.rippleT = 1.1;
-        game.renderer.water?.addRipple(this.pos.x, this.pos.z, 0.25);
-      }
-    }
-
-    // healing
-    if (this.healLeft > 0) {
-      const h = Math.min(this.healLeft, 35 * dt);
-      this.healLeft -= h;
-      this.hp = Math.min(100, this.hp + h);
-    }
-    if (t - this.lastHurt > 6 && this.hp < 100) this.hp = Math.min(100, this.hp + 10 * dt);
+    this.steps(game, dt);
+    // health is the host's call online
+    if (game.authority) this.vitals(t, dt);
 
     // weapon switching
     if (it.switchTo >= 0) {
@@ -341,6 +340,82 @@ export class Soldier {
     this.animate(dt, t);
   }
 
+  /** footsteps, wading and ripples */
+  private steps(game: Game, dt: number) {
+    const hs = Math.hypot(this.vel.x, this.vel.z);
+    if (hs > 0.5 && this.onGround) {
+      this.walkPhase += dt * hs * 2.4;
+      this.footT -= dt * hs;
+      if (this.footT <= 0) {
+        this.footT = 1.7;
+        if (this.waterDepth > 0.05) {
+          game.renderer.water?.addRipple(this.pos.x, this.pos.z, 0.6);
+          game.particles.splash(this.pos.x, WATER_Y, this.pos.z, 3, 0.4);
+          game.audio.splash(this.pos, 0.3);
+        } else game.audio.foot(this.pos, 1, this.groundMat(game), this.isPlayer, this.sprinting);
+      }
+    } else this.walkPhase *= Math.exp(-dt * 6);
+    if (this.waterDepth > 0.05 && hs < 0.5) {
+      this.rippleT -= dt;
+      if (this.rippleT < 0) {
+        this.rippleT = 1.1;
+        game.renderer.water?.addRipple(this.pos.x, this.pos.z, 0.25);
+      }
+    }
+  }
+
+  /** medkit healing and out-of-combat regeneration */
+  private vitals(t: number, dt: number) {
+    if (this.healLeft > 0) {
+      const h = Math.min(this.healLeft, 35 * dt);
+      this.healLeft -= h;
+      this.hp = Math.min(100, this.hp + h);
+    }
+    if (t - this.lastHurt > 6 && this.hp < 100) this.hp = Math.min(100, this.hp + 10 * dt);
+  }
+
+  /** a soldier moved from elsewhere (its peer, or the host): only feet, health and animation run here */
+  private follow(game: Game, dt: number) {
+    this.waterDepth = Math.max(0, WATER_Y - this.pos.y);
+    this.steps(game, dt);
+    if (this.ctl === 'remote') this.vitals(game.time, dt);
+    if (this.switchT > 0) this.switchT -= dt;
+    const w = this.weapon;
+    if (w.stats.spinUp > 0) game.audio.spin(w, this.pos, w.spin, false);
+    this.animate(dt, game.time);
+  }
+
+  /** remembers where it stood, so shots from a lagging peer can be judged against what they saw */
+  record(t: number) {
+    const h = this.hist, i = this.histI * 4;
+    h[i] = t;
+    h[i + 1] = this.pos.x;
+    h[i + 2] = this.pos.y;
+    h[i + 3] = this.pos.z;
+    this.histI = (this.histI + 1) % HIST;
+    this.histN = Math.min(HIST, this.histN + 1);
+  }
+
+  /** position at an earlier time (falls back to now) */
+  posAt(t: number, out: THREE.Vector3) {
+    const h = this.hist;
+    out.copy(this.pos);
+    let newer = -1;
+    for (let k = 1; k <= this.histN; k++) {
+      const i = ((this.histI - k + HIST) % HIST) * 4;
+      if (h[i] <= t) {
+        if (newer < 0) return out.set(h[i + 1], h[i + 2], h[i + 3]);
+        const span = h[newer] - h[i];
+        const f = span > 1e-5 ? (t - h[i]) / span : 0;
+        return out.set(h[i + 1] + (h[newer + 1] - h[i + 1]) * f, h[i + 2] + (h[newer + 2] - h[i + 2]) * f, h[i + 3] + (h[newer + 3] - h[i + 3]) * f);
+      }
+      newer = i;
+    }
+    // older than anything we kept
+    if (newer >= 0) out.set(h[newer + 1], h[newer + 2], h[newer + 3]);
+    return out;
+  }
+
   computeMuzzle() {
     if (this.isPlayer) {
       this.muzzle.copy(this.fpEye);
@@ -419,7 +494,7 @@ export class Soldier {
     p.z = clamp(p.z, 1, game.mapD - 1);
   }
 
-  private animate(dt: number, t: number) {
+  animate(dt: number, t: number) {
     const rig = this.rig;
     this.bodyYaw += angleDiff(this.bodyYaw, this.yaw) * Math.min(1, dt * 18);
     rig.body.rotation.y = this.bodyYaw;
@@ -449,7 +524,7 @@ export class Soldier {
     if (this.isPlayer) this.setRigLayer(1);
   }
 
-  private updateDead(game: Game, dt: number) {
+  updateDead(game: Game, dt: number) {
     if (this.isPlayer) this.setRigLayer(0);
     this.deathT += dt;
     const rig = this.rig;
@@ -489,6 +564,9 @@ export class Soldier {
     this.vel.set(0, 0, 0);
     this.hp = 100;
     this.alive = true;
+    this.life++;
+    this.deathT = 0;
+    this.histN = 0;
     this.protectedUntil = time + 2.5;
     this.healLeft = 0;
     for (const w of this.weapons) w.refill();

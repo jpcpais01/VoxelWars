@@ -58,7 +58,9 @@ const _g = new THREE.Vector3(0, -GRAVITY, 0);
  * A rigid chunk of voxels: it pivots over the edge it was left standing on, tears free and flies
  * with the momentum it picked up, and breaks apart when it lands hard.
  */
-class FallingBody {
+export class FallingBody {
+  /** network id (online matches) */
+  nid = 0;
   /** placed at the centre of mass and rotated; the voxel mesh inside is offset to the grid corner */
   mesh = new THREE.Group();
   voxMesh: THREE.Mesh;
@@ -184,12 +186,14 @@ class FallingBody {
       if (z < minZ) minZ = z;
     }
     const grid = new Int16Array(n * 3);
+    world.quiet = true;
     for (let i = 0; i < n; i++) {
       grid[i * 3] = coords[i * 3] - minX;
       grid[i * 3 + 1] = coords[i * 3 + 1] - minY;
       grid[i * 3 + 2] = coords[i * 3 + 2] - minZ;
       world.set(coords[i * 3], coords[i * 3 + 1], coords[i * 3 + 2], 0);
     }
+    world.quiet = false;
     const corner = new THREE.Vector3(minX * VOXEL, minY * VOXEL, minZ * VOXEL);
     return new FallingBody(grid, mats, corner, new THREE.Quaternion(), scene, 0, corner);
   }
@@ -350,7 +354,7 @@ class FallingBody {
     return this.vel.length() + this.spin.length() * this.radius * 0.6;
   }
 
-  private syncMesh() {
+  syncMesh() {
     this.mesh.position.copy(this.pos);
     this.mesh.quaternion.copy(this.quat);
   }
@@ -371,6 +375,15 @@ export class Destruction {
   readonly log: { kind: Fail; n: number; ratio: number; taken: number }[] = [];
   private tmpC = new THREE.Color();
   barrelsPending: { x: number; y: number; z: number; size: number; t: number }[] = [];
+  /** online host: told whenever a falling piece appears or is gone for good */
+  onBodyAdd: ((b: FallingBody) => void) | null = null;
+  onBodyEnd: ((b: FallingBody) => void) | null = null;
+  /** online peer: the host decides what breaks and falls; pieces here only follow its reports */
+  puppet = false;
+  readonly puppets = new Map<number, FallingBody>();
+  /** recent blasts on a peer, so the voxels they knock out fly away from them */
+  private blasts: { x: number; y: number; z: number; r: number; t: number }[] = [];
+  private clock = 0;
 
   constructor(
     private world: World,
@@ -627,6 +640,7 @@ export class Destruction {
     }
     body.setMotion(motion);
     this.bodies.push(body);
+    this.onBodyAdd?.(body);
     this.ev.onTopple(body.pos.x, body.pos.y, body.pos.z, body.isTree);
   }
 
@@ -770,8 +784,10 @@ export class Destruction {
       // nudge it up off the surface it hit so it doesn't start inside it
       f.pos.y += VOXEL * 0.5;
       this.bodies.push(f);
+      this.onBodyAdd?.(f);
     }
     b.dispose(this.scene);
+    this.onBodyEnd?.(b);
     const cx = sx / n, cy = sy / n, cz = sz / n;
     for (let i = 0; i < 16; i++) this.particles.dust(cx + (Math.random() - 0.5) * (maxX - minX), cy, cz + (Math.random() - 0.5) * (maxZ - minZ), 0.55, 0.5, 0.42, 2.5, 2.5);
     this.ev.onBodyImpact(cx, cy, cz, n * VK3, minX, minZ, maxX, maxZ, false);
@@ -823,12 +839,15 @@ export class Destruction {
       }
     }
     b.dispose(this.scene);
+    this.onBodyEnd?.(b);
     const cx = sx / n, cy = sy / n, cz = sz / n;
     for (let i = 0; i < 10; i++) this.particles.dust(cx + (Math.random() - 0.5) * (maxX - minX), cy, cz + (Math.random() - 0.5) * (maxZ - minZ), 0.55, 0.5, 0.42, 2, 2);
     this.ev.onBodyImpact(cx, cy, cz, n * VK3, minX, minZ, maxX, maxZ, b.isTree);
   }
 
   update(dt: number) {
+    this.clock += dt;
+    if (this.puppet) return;
     for (const { res, box } of this.structure.update(dt)) for (const sb of res.bodies) this.release(sb, box);
     for (let i = this.bodies.length - 1; i >= 0; i--) {
       const b = this.bodies[i];
@@ -848,6 +867,74 @@ export class Destruction {
   }
 
   get activeBodies() {
-    return this.bodies.length;
+    return this.bodies.length + this.puppets.size;
+  }
+
+  /** pieces in flight right now (the host streams their poses) */
+  get flying(): readonly FallingBody[] {
+    return this.bodies;
+  }
+
+  // ------------------------------------------------------------------ online peer side
+  /** a piece the host set falling: drawn here, posed from the host's stream */
+  addPuppet(nid: number, grid: Int16Array, mats: Uint8Array, gen: number, colorOffset: THREE.Vector3, pos: THREE.Vector3, quat: THREE.Quaternion) {
+    this.dropPuppet(nid);
+    const b = new FallingBody(grid, mats, new THREE.Vector3(), quat, this.scene, gen, colorOffset);
+    b.nid = nid;
+    b.pos.copy(pos);
+    b.quat.copy(quat);
+    b.syncMesh();
+    this.puppets.set(nid, b);
+    return b;
+  }
+
+  dropPuppet(nid: number) {
+    const b = this.puppets.get(nid);
+    if (!b) return;
+    b.dispose(this.scene);
+    this.puppets.delete(nid);
+  }
+
+  /** a blast the host reported: voxels it knocks out in the next moments fly away from it */
+  noteBlast(x: number, y: number, z: number, r: number) {
+    this.blasts.push({ x, y, z, r, t: this.clock });
+    if (this.blasts.length > 12) this.blasts.shift();
+  }
+
+  /** applies the host's voxel edits; broken voxels throw a little debris */
+  applyRemote(idx: Uint32Array, mats: Uint8Array, fx: boolean) {
+    const w = this.world;
+    const vox = w.vox;
+    let budget = fx ? 70 : 0;
+    const now = this.clock;
+    this.blasts = this.blasts.filter((b) => now - b.t < 0.8);
+    for (let k = 0; k < idx.length; k++) {
+      const raw = idx[k];
+      const quiet = raw >= 0x80000000;
+      const i = raw & 0x7fffffff;
+      const m = mats[k];
+      const old = vox[i];
+      const y = i % WY, t = (i / WY) | 0, z = t % WZ, x = (t / WZ) | 0;
+      w.set(x, y, z, m);
+      if (quiet || m !== 0 || old === 0 || budget <= 0 || !MATS[old]) continue;
+      const px = (x + 0.5) * VOXEL, py = (y + 0.5) * VOXEL, pz = (z + 0.5) * VOXEL;
+      let vx = (Math.random() - 0.5) * 3, vy = 2 + Math.random() * 3, vz = (Math.random() - 0.5) * 3;
+      let blast = false;
+      for (const b of this.blasts) {
+        const dx = px - b.x, dy = py - b.y + 0.5, dz = pz - b.z;
+        const l = Math.hypot(dx, dy, dz);
+        if (l > b.r + 1.2) continue;
+        const sp = (6 + Math.random() * 9) / (l + 0.1);
+        vx = dx * sp;
+        vy = dy * sp + 4;
+        vz = dz * sp;
+        blast = true;
+        break;
+      }
+      if (!blast && Math.random() < 0.5) continue;
+      budget--;
+      const leafy = MATS[old].kind === 'leaf';
+      this.debris.spawn(px, py, pz, vx, vy, vz, DEB * (blast ? 0.5 + Math.random() * 0.45 : leafy ? 0.3 : 0.45), linearColor(old, this.tmpC), blast ? 5 : leafy ? 3 : 4, leafy);
+    }
   }
 }

@@ -10,7 +10,9 @@
     "icons": "node scripts/gen-icons.mjs"
   },
   "dependencies": {
-    "three": "^0.186.1"
+    "@trystero-p2p/ws-relay": "^0.26.0",
+    "three": "^0.186.1",
+    "trystero": "^0.26.0"
   },
   "devDependencies": {
     "@types/three": "^0.186.0",
