@@ -11,7 +11,7 @@ export const PATCH_NOTES: PatchGroup[] = [
     title: 'Full Screen',
     entries: [
       'New fullscreen button in the top-right corner of the menus and the pause screen; on phones it also turns the game sideways. Fixed: after a refused mouse capture (most often resuming right after Esc), looking around no longer stops at the edge of the screen, which was easiest to hit in F11 fullscreen. The game now shows Click to aim and captures the mouse on your next click.',
-      'Brand new app icon: a bright cube of fine voxels with a corner just shot out of it, chips flying, framed in a crosshair over a blue-versus-red team split. It stays bold and readable from your home screen down to a tiny browser tab. Already installed the app? The new icon shows up once your device refreshes it.',
+      'Brand new app icon: a voxel soldier in a combat helmet and orange goggles, standing in front of a setting voxel sun. It stays bold and readable from your home screen down to a tiny browser tab. Already installed the app? The new icon shows up once your device refreshes it.',
     ],
   },
   {
