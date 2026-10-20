@@ -352,6 +352,27 @@ export class ChunkManager {
     for (const m of this.meshes) if (m) m.material = (flip = !flip) ? this.material : this.materialSolid;
   }
 
+  /** grass only exists close to the camera (blades also fade out in the shader before this) */
+  cullGrass(x: number, z: number, r = 46) {
+    const half = (CHUNK * VOXEL) / 2;
+    const lim = (r + half * 1.42) ** 2;
+    for (let k = 0; k < this.grass.length; k++) {
+      const g = this.grass[k];
+      if (!g) continue;
+      const mx = (k % CX) * CHUNK * VOXEL + half, mz = ((k / CX) | 0) * CHUNK * VOXEL + half;
+      g.visible = this.grassEnabled && (mx - x) ** 2 + (mz - z) ** 2 < lim;
+    }
+  }
+
+  /** baked open-sky visibility (0..1) at a world point */
+  skyAt(x: number, y: number, z: number) {
+    const s = 2 * VOXEL;
+    const i = Math.min(SKY_W - 1, Math.max(0, Math.floor(x / s)));
+    const j = Math.min(SKY_D - 1, Math.max(0, Math.floor(z / s)));
+    const k = Math.min(SKY_H - 1, Math.max(0, Math.floor(y / s)));
+    return this.skyData[i + j * SKY_W + k * SKY_W * SKY_D] / 255;
+  }
+
   setGrass(on: boolean) {
     this.grassEnabled = on;
     for (const g of this.grass) if (g) g.visible = on;

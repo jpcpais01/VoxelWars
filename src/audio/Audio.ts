@@ -15,6 +15,8 @@ export class Audio {
   private wind!: GainNode;
   private windFilter!: BiquadFilterNode;
   listener = new THREE.Vector3();
+  /** heading of the listener (atan2(dx, dz)); sounds pan relative to it */
+  listenerYaw = Math.PI;
   volume = 0.8;
   private lastTick = 0;
   private recent = new Map<string, number>();
@@ -84,7 +86,9 @@ export class Audio {
     const dx = pos.x - this.listener.x, dz = pos.z - this.listener.z;
     const d = Math.hypot(dx, dz);
     const gain = 1 / (1 + (d * d) / (range * range));
-    return { gain, pan: Math.max(-0.85, Math.min(0.85, dx / 25)) };
+    // right of the heading is (-cos, sin)
+    const side = -dx * Math.cos(this.listenerYaw) + dz * Math.sin(this.listenerYaw);
+    return { gain, pan: Math.max(-0.85, Math.min(0.85, side / (d + 3))) };
   }
 
   private out(pos: THREE.Vector3 | null, range: number, vol: number): AudioNode | null {

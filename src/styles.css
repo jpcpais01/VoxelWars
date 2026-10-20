@@ -1166,6 +1166,74 @@ kbd {
 #crosshair.enemy .dot {
   background: #ff6a55;
 }
+#crosshair.sprint {
+  opacity: 0.25 !important;
+}
+#scope {
+  position: fixed;
+  inset: 0;
+  display: none;
+  pointer-events: none;
+  z-index: 5;
+  background: radial-gradient(circle at 50% 50%, transparent 0, transparent min(36vh, 36vw), rgba(4, 6, 6, 0.75) calc(min(36vh, 36vw) + 1px), #050707 calc(min(36vh, 36vw) + 10px));
+}
+#scope.on {
+  display: block;
+}
+#scope::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: calc(min(72vh, 72vw));
+  height: calc(min(72vh, 72vw));
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  box-shadow: inset 0 0 44px 8px rgba(0, 0, 0, 0.55);
+}
+#scope .ret {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: calc(min(72vh, 72vw));
+  height: calc(min(72vh, 72vw));
+  transform: translate(-50%, -50%);
+  background:
+    linear-gradient(#111, #111) center / 1.5px 100% no-repeat,
+    linear-gradient(#111, #111) center / 100% 1.5px no-repeat;
+}
+#scope.scope8 .ret {
+  background:
+    radial-gradient(circle, #ff3b2f 0 2px, transparent 2.5px),
+    linear-gradient(#0c0c0c, #0c0c0c) center / 4px 34% no-repeat,
+    linear-gradient(#0c0c0c, #0c0c0c) center / 34% 4px no-repeat,
+    linear-gradient(#0c0c0c, #0c0c0c) center / 1.2px 100% no-repeat,
+    linear-gradient(#0c0c0c, #0c0c0c) center / 100% 1.2px no-repeat;
+}
+#scope.acog .ret {
+  background: linear-gradient(#111, #111) 50% 75% / 1.5px 50% no-repeat;
+}
+#scope.acog .ret::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+  transform: translate(-50%, -20%);
+  border-left: 9px solid transparent;
+  border-right: 9px solid transparent;
+  border-bottom: 14px solid #ff4a2a;
+  filter: drop-shadow(0 0 4px rgba(255, 80, 40, 0.8));
+}
+#scope.thermal {
+  background: radial-gradient(circle at 50% 50%, rgba(255, 140, 60, 0.12) 0, rgba(255, 140, 60, 0.12) min(36vh, 36vw), #050707 calc(min(36vh, 36vw) + 8px));
+}
+#scope.thermal .ret {
+  background:
+    linear-gradient(rgba(255, 190, 120, 0.9), rgba(255, 190, 120, 0.9)) center / 1.5px 30% no-repeat,
+    linear-gradient(rgba(255, 190, 120, 0.9), rgba(255, 190, 120, 0.9)) center / 30% 1.5px no-repeat;
+}
 #crosshair.reload #cross-ring {
   border-style: dashed;
   opacity: 0.6;

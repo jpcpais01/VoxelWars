@@ -42,6 +42,7 @@
         <div id="reload-bar"><i></i></div>
         <div id="spin"><i></i></div>
       </div>
+      <div id="scope"><div class="ret"></div></div>
       <div id="crosshair"><div id="cross-ring"></div><div class="dot"></div></div>
       <div id="hitmarker"><i></i><i></i><i></i><i></i></div>
       <div id="dmgdirs"></div>
@@ -74,7 +75,7 @@
     <div id="menu" class="screen hidden">
       <div class="menu-left">
         <div class="logo"><span class="v">VOXEL</span><span class="w">WARS</span></div>
-        <div class="tagline">Pinewater Valley · 5v5 · Destroy the enemy core</div>
+        <div class="tagline">Pinewater Valley · 5v5 first person · Destroy the enemy core</div>
         <button class="btn primary deploy" id="btn-deploy"><span>Deploy</span><small id="deploy-sub"></small></button>
         <div class="mcard setup">
           <div class="setup-row"><label>Difficulty</label><div class="seg" id="set-diff"><button data-v="recruit">Recruit</button><button data-v="regular">Regular</button><button data-v="veteran">Veteran</button></div></div>
@@ -92,7 +93,7 @@
         <div class="mcard"><h4>Your kit</h4><div class="menu-kit" id="menu-kit"></div></div>
         <div class="mcard"><h4>Service record</h4><div class="career" id="career"></div></div>
       </div>
-      <div class="menu-foot">v0.2 · Built for speed: off-thread meshing and dynamic resolution keep it smooth on phones and laptops</div>
+      <div class="menu-foot">v0.3 · First person · Built for speed: off-thread meshing and dynamic resolution keep it smooth on phones and laptops</div>
     </div>
 
     <div id="loadout" class="panel-screen">
@@ -108,7 +109,8 @@
         <header><h1>Settings</h1><button class="btn primary" data-close>Done</button></header>
         <div class="setting"><label>Graphics quality</label><div class="seg" id="set-quality"><button data-q="auto">Auto</button><button data-q="low">Low</button><button data-q="medium">Medium</button><button data-q="high">High</button><button data-q="ultra">Ultra</button></div></div>
         <div class="setting"><label>Volume</label><input type="range" id="set-volume" min="0" max="1" step="0.05" /></div>
-        <div class="setting"><label>Camera distance</label><input type="range" id="set-zoom" min="0.7" max="1.4" step="0.05" /></div>
+        <div class="setting"><label>Look sensitivity <b id="sens-val"></b></label><input type="range" id="set-sens" min="0.2" max="3" step="0.05" /></div>
+        <div class="setting"><label>Field of view <b id="fov-val"></b></label><input type="range" id="set-fov" min="70" max="110" step="1" /></div>
         <div class="setting"><label>Show FPS</label><input type="checkbox" id="set-fps" /></div>
         <p class="hint">Dynamic resolution is always on: the game lowers its internal resolution briefly when the frame rate dips.</p>
       </div>
@@ -126,8 +128,8 @@
         <header><h1>How to play</h1><button class="btn primary" data-close>Got it</button></header>
         <div class="help-grid">
           <div><h3>Objective</h3><p>Each team has an energy core inside its HQ bunker. Push across the river, breach the bunker and destroy the enemy core while holding off attacks on yours. Explosives hit cores much harder than bullets.</p></div>
-          <div><h3>Keyboard &amp; mouse</h3><p><kbd>WASD</kbd> move · <kbd>Mouse</kbd> aim · <kbd>LMB</kbd> fire · <kbd>RMB</kbd> aim down sights (looks further ahead) · <kbd>Shift</kbd> sprint · <kbd>Space</kbd> jump · <kbd>R</kbd> reload · <kbd>1</kbd>/<kbd>2</kbd>/<kbd>Q</kbd>/wheel swap · <kbd>G</kbd> equipment · <kbd>Tab</kbd> scores · <kbd>Esc</kbd> pause · <kbd>+</kbd>/<kbd>-</kbd> zoom</p></div>
-          <div><h3>Touch</h3><p>Left thumb moves. Right thumb aims; push it past the ring to fire. Aim assist gently locks onto enemies you can see. Buttons handle aiming, reload, swap, equipment and jump.</p></div>
+          <div><h3>Keyboard &amp; mouse</h3><p>Click the game to capture the mouse. <kbd>WASD</kbd> move · <kbd>Mouse</kbd> look · <kbd>LMB</kbd> fire · <kbd>RMB</kbd> aim down sights · <kbd>Shift</kbd> sprint · <kbd>Space</kbd> jump · <kbd>R</kbd> reload · <kbd>1</kbd>/<kbd>2</kbd>/<kbd>Q</kbd>/wheel swap · <kbd>G</kbd> equipment · <kbd>Tab</kbd> scores · <kbd>Esc</kbd> pause</p></div>
+          <div><h3>Touch</h3><p>Left thumb moves; push all the way up to sprint. Drag anywhere on the right to look. Hold FIRE to shoot and AIM for the sights. Aim assist slows and nudges your view onto enemies near the crosshair.</p></div>
           <div><h3>Destruction</h3><p>Nearly everything breaks. Cut a trunk and the tree falls (on whoever is under it). Knock out the base of a wall and the roof comes down. Red fuel barrels chain-react. Craters near the river flood.</p></div>
           <div><h3>Scoring</h3><p>Eliminations 100, headshots +50, assists 40, multi-kills and streaks pay bonuses, ending an enemy streak pays 50, and every point of core damage is worth half a point. The match MVP is whoever scores most.</p></div>
           <div><h3>Tips</h3><p>Canopies hide you from above, and bushes block sight lines. Suppressors keep you off the enemy minimap. Rockets and demo charges open new paths into bunkers. Refill ammo at your base's supply depot.</p></div>
