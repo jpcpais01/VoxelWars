@@ -7,6 +7,13 @@ export interface PatchGroup {
 
 export const PATCH_NOTES: PatchGroup[] = [
   {
+    hour: '2026-10-20 · 20:00 UTC',
+    title: 'Full Screen',
+    entries: [
+      'New fullscreen button in the top-right corner of the menus and the pause screen; on phones it also turns the game sideways. Fixed: after a refused mouse capture (most often resuming right after Esc), looking around no longer stops at the edge of the screen, which was easiest to hit in F11 fullscreen. The game now shows Click to aim and captures the mouse on your next click.',
+    ],
+  },
+  {
     hour: '2026-10-20 · 19:00 UTC',
     title: 'Twice as Fine',
     entries: [

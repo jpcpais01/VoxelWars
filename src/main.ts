@@ -266,7 +266,47 @@ function refreshInputEnabled() {
   document.body.classList.toggle('playing', input.enabled);
   if (input.enabled) input.capture();
   else input.release();
+  syncLockHint();
 }
+function syncLockHint() {
+  document.body.classList.toggle('needs-lock', input.needsCapture);
+}
+input.onLockChange = syncLockHint;
+
+// ------------------------------------------------------------------------------------ fullscreen
+const fsBtn = $('btn-fullscreen');
+const fsRoot = document.documentElement as HTMLElement & { webkitRequestFullscreen?: () => void };
+const fsDoc = document as Document & { webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => void; webkitFullscreenEnabled?: boolean };
+const isFullscreen = () => !!(document.fullscreenElement ?? fsDoc.webkitFullscreenElement);
+// iPhone Safari has no fullscreen API, and an installed app is already full screen
+const standalone = matchMedia('(display-mode: fullscreen), (display-mode: standalone)').matches;
+if ((document.fullscreenEnabled || fsDoc.webkitFullscreenEnabled) && !standalone) fsBtn.classList.remove('hidden');
+function syncFullscreen() {
+  const on = isFullscreen();
+  fsBtn.classList.toggle('on', on);
+  fsBtn.title = on ? 'Exit fullscreen' : 'Fullscreen';
+  fsBtn.setAttribute('aria-label', fsBtn.title);
+}
+fsBtn.addEventListener('click', async () => {
+  audio.uiClick();
+  try {
+    if (isFullscreen()) {
+      if (document.exitFullscreen) await document.exitFullscreen();
+      else fsDoc.webkitExitFullscreen?.();
+    } else {
+      if (fsRoot.requestFullscreen) await fsRoot.requestFullscreen({ navigationUI: 'hide' });
+      else fsRoot.webkitRequestFullscreen?.();
+      // phones play sideways
+      const o = screen.orientation as ScreenOrientation & { lock?: (o: string) => Promise<void> };
+      if (input.touch) o?.lock?.('landscape').catch(() => {});
+    }
+  } catch {
+    /* the browser said no; nothing to undo */
+  }
+  syncFullscreen();
+});
+document.addEventListener('fullscreenchange', syncFullscreen);
+document.addEventListener('webkitfullscreenchange', syncFullscreen);
 
 // losing the mouse (Esc, alt-tab) while playing pauses the match
 let lastUnlock = 0;
