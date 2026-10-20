@@ -641,7 +641,8 @@ export class Game {
       if (p.kind === 'rocket') p.mesh.lookAt(p.pos.x + p.vel.x, p.pos.y + p.vel.y, p.pos.z + p.vel.z);
       else p.mesh.rotation.x += dt * speed * 2;
     }
-    if (p.fuse <= 0 && p.kind !== 'grenade') {
+    // timed throwables; rockets and launcher grenades go off on impact (or when their life runs out)
+    if (p.fuse <= 0 && p.kind !== 'grenade' && p.kind !== 'rocket') {
       this.detonate(p);
       return;
     }

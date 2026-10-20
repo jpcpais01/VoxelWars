@@ -14,7 +14,7 @@ export const PATCH_NOTES: PatchGroup[] = [
       'Every building is rebuilt at the new detail. The HQ bunkers have panel joints, a blast door, firing slits, roof vents, an antenna and dish, lamps at the entrance, staggered sandbag walls, steel hedgehogs, a braced watchtower with a ladder and a supply depot under a camo net. The cabins get log walls, a fireplace, furniture, a porch, a fenced yard, hay bales and a well, and the ruins, island tower, bridges and docks are all new too.',
       'A new forest: tapered pines, broad oaks with branching limbs, birches with dark bark marks, berry bushes, ferns that sway in the wind, fallen logs, stumps, mossy boulders and pebbles.',
       'Smooth at any distance: the world now draws in three levels of detail, full detail around you and lighter versions further away, so the finer world runs about as fast as the old one. Settings quality also sets how far full detail reaches.',
-      'Destruction at the new scale: bullets chip 20 cm blocks and crack the ones around them, explosions carve smoother craters, and trees only hold each other up through their trunks now, so a tree you cut down topples even when its crown touches a neighbour and takes just its own leaves with it.',
+      'Destruction at the new scale: bullets chip 20 cm blocks and crack the ones around them, explosions carve smoother craters, and trees only hold each other up through their trunks now, so a tree you cut down topples even when its crown touches a neighbour and takes just its own leaves with it. Fixed: Thunder RPG rockets no longer burst a step out of the tube and hurt you; they fly until they hit something.',
     ],
   },
   {
