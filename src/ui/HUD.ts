@@ -73,7 +73,7 @@ export class HUD {
   hitmarker(kill: boolean, head: boolean) {
     this.hitEl.className = kill ? 'show kill' : head ? 'show head' : 'show';
     void this.hitEl.offsetWidth;
-    this.game.audio.hitmarker(kill);
+    this.game.audio.hitmarker(kill, head);
     clearTimeout((this.hitEl as unknown as { _t: number })._t);
     (this.hitEl as unknown as { _t: number })._t = window.setTimeout(() => (this.hitEl.className = ''), kill ? 380 : 160);
   }
@@ -92,7 +92,7 @@ export class HUD {
       this.streakEl.className = '';
       void this.streakEl.offsetWidth;
       this.streakEl.className = 'show';
-      this.game.audio.hitmarker(true);
+      this.game.audio.streak();
     }
   }
 
