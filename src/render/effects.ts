@@ -270,6 +270,91 @@ export class Particles {
     }
   }
 
+  /**
+   * A blast: white-hot core flash, a fireball that bursts outward and burns down to embers, a hot
+   * shock ring, streaking sparks, a ground dust skirt and only a light veil of smoke afterwards.
+   * `ground` is the height of the ground under it if close, else NaN; r/g/b tint the dust.
+   */
+  explosion(x: number, y: number, z: number, radius: number, ground = NaN, r = 0.55, g = 0.47, b = 0.36) {
+    const R = radius;
+    const rnd = Math.random;
+    // core flash
+    this.add.spawn({ x, y, z, size: R * 1.2, grow: R * 2.5, life: 0.09, r: 6, g: 5, b: 3.6, fadeIn: 0.001, soft: 1.5 });
+    this.add.spawn({ x, y, z, size: R * 0.7, life: 0.16, r: 5, g: 3, b: 1.1, fadeIn: 0.001, soft: 1 });
+    // fireball: puffs burst along random directions and stall against drag, burning down to red
+    const nf = Math.round(10 + R * 4);
+    for (let i = 0; i < nf; i++) {
+      const u = rnd() * 2 - 1, a = rnd() * 6.283, h = Math.sqrt(1 - u * u);
+      const dx = h * Math.cos(a), dy = Math.abs(u) * 0.8 + 0.2, dz = h * Math.sin(a);
+      const sp = R * (3 + rnd() * 4);
+      const hot = rnd() < 0.3;
+      this.add.spawn({
+        x: x + dx * 0.2, y: y + dy * 0.2, z: z + dz * 0.2,
+        vx: dx * sp, vy: dy * sp, vz: dz * sp,
+        size: R * (0.22 + rnd() * 0.2), grow: R * (0.7 + rnd() * 0.5), life: 0.35 + rnd() * 0.4,
+        r: hot ? 3.2 : 2.4, g: hot ? 1.9 : 0.95, b: hot ? 0.7 : 0.22, r2: 0.9, g2: 0.16, b2: 0.03, a: 0.6,
+        drag: 6, gravity: -2.5, fadeIn: 0.015, spin: (rnd() - 0.5) * 3, soft: 1,
+      });
+    }
+    // hot shock ring racing out flat across the blast
+    const nr = Math.round(14 + R * 3);
+    for (let i = 0; i < nr; i++) {
+      const a = (i / nr) * 6.283 + rnd() * 0.2;
+      const sp = R * 9;
+      this.add.spawn({
+        x, y: y + 0.1, z,
+        vx: Math.cos(a) * sp, vy: 0, vz: Math.sin(a) * sp,
+        size: 0.16 + R * 0.05, life: 0.16, r: 6, g: 4.2, b: 2.4, r2: 2, g2: 0.8, b2: 0.3,
+        drag: 7, stretch: 0.04, fadeIn: 0.001, soft: 0.3,
+      });
+    }
+    // sparks streak out and arc down; a few slow embers drift on the heat
+    const ns = Math.round(R * 7);
+    for (let i = 0; i < ns; i++) {
+      const a = rnd() * 6.283, up = 0.2 + rnd() * 1.1;
+      const sp = 9 + rnd() * 16;
+      this.add.spawn({
+        x, y, z,
+        vx: Math.cos(a) * sp, vy: up * sp, vz: Math.sin(a) * sp,
+        size: 0.05 + rnd() * 0.03, life: 0.35 + rnd() * 0.6, r: 7, g: 4, b: 1.4, r2: 3, g2: 0.9, b2: 0.15,
+        gravity: 16, drag: 1.2, stretch: 0.035, fadeIn: 0.001, soft: 0.1,
+      });
+    }
+    const ne = Math.round(R * 3);
+    for (let i = 0; i < ne; i++) {
+      this.add.spawn({
+        x: x + (rnd() - 0.5) * R * 0.8, y: y + rnd() * R * 0.4, z: z + (rnd() - 0.5) * R * 0.8,
+        vx: (rnd() - 0.5) * 3, vy: 2 + rnd() * 3, vz: (rnd() - 0.5) * 3,
+        size: 0.06 + rnd() * 0.05, life: 1 + rnd() * 1.2, r: 4.5, g: 1.8, b: 0.4, r2: 1.2, g2: 0.25, b2: 0.05,
+        gravity: 1.2, drag: 1.4, fadeIn: 0.05, soft: 0.1,
+      });
+    }
+    // ground skirt: dust thrown out in a ring hugging the ground
+    if (ground === ground) {
+      const nd = Math.round(10 + R * 3);
+      for (let i = 0; i < nd; i++) {
+        const a = (i / nd) * 6.283 + rnd() * 0.3;
+        const sp = R * (2.5 + rnd() * 2);
+        this.alpha.spawn({
+          x: x + Math.cos(a) * 0.3, y: ground + 0.15, z: z + Math.sin(a) * 0.3,
+          vx: Math.cos(a) * sp, vy: 0.3 + rnd() * 0.8, vz: Math.sin(a) * sp,
+          size: 0.3 + R * 0.1, grow: R * 0.5, life: 0.7 + rnd() * 0.5,
+          r, g, b, a: 0.45, drag: 4, gravity: 0.3, fadeIn: 0.03, soft: 0.8,
+        });
+      }
+    }
+    // a thin, short veil of smoke that rises once the fire is out
+    const nm = Math.round(2 + R * 1.2);
+    for (let i = 0; i < nm; i++) {
+      this.alpha.spawn({
+        x: x + (rnd() - 0.5) * R * 0.5, y: y + 0.3 + rnd() * R * 0.3, z: z + (rnd() - 0.5) * R * 0.5,
+        vx: (rnd() - 0.5) * 0.8, vy: 1.2 + rnd() * 1.2, vz: (rnd() - 0.5) * 0.8,
+        size: R * (0.35 + rnd() * 0.2), grow: R * 0.45, life: 1.5 + rnd() * 1.1,
+        r: 0.34, g: 0.33, b: 0.33, a: 0.32, drag: 0.9, gravity: -0.4, fadeIn: 0.35, spin: (rnd() - 0.5) * 0.5, soft: 1.2,
+      });
+    }
+  }
+
   muzzle(x: number, y: number, z: number, dx: number, dz: number, scale = 1) {
     this.add.spawn({ x, y, z, size: 0.35 * scale, life: 0.05, r: 9, g: 6, b: 2.5, fadeIn: 0.001, soft: 0.1 });
     this.add.spawn({ x: x + dx * 0.2, y, z: z + dz * 0.2, vx: dx * 6, vz: dz * 6, size: 0.18 * scale, life: 0.06, r: 8, g: 4.5, b: 1.5, stretch: 0.05, fadeIn: 0.001, soft: 0.1 });
