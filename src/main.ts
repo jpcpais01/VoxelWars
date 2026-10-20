@@ -243,11 +243,18 @@ function openPanel(id: string) {
   $(id).classList.add('open');
   input.enabled = false;
   input.release();
+  syncPauseOverlay();
 }
 function closePanel(id: string) {
   audio.uiClick(0.7);
   $(id).classList.remove('open');
   refreshInputEnabled();
+  syncPauseOverlay();
+}
+// The pause menu steps aside while Settings or Loadout is on top of it, and comes back when they close.
+function syncPauseOverlay() {
+  const covered = editor.isOpen || [...document.querySelectorAll('.panel-screen.open')].some((el) => el.id !== 'pause');
+  $('pause').classList.toggle('open', paused && !covered);
 }
 function anyPanelOpen() {
   return document.querySelectorAll('.panel-screen.open').length > 0;
@@ -279,6 +286,7 @@ function openLoadout() {
   input.enabled = false;
   input.release();
   editor.open();
+  syncPauseOverlay();
 }
 editor.onClose = (l) => {
   renderMenuKit();
@@ -288,6 +296,7 @@ editor.onClose = (l) => {
     else hud?.message('Loadout applies on respawn', 'info');
   }
   refreshInputEnabled();
+  syncPauseOverlay();
 };
 $('lo-done').addEventListener('click', () => editor.close());
 
@@ -377,7 +386,7 @@ $('e-menu').addEventListener('click', () => location.reload());
 function setPaused(p: boolean) {
   if (state !== 'playing' || game.over) return;
   paused = p;
-  $('pause').classList.toggle('open', p);
+  syncPauseOverlay();
   if (p) {
     input.keys.clear();
     input.lmb = input.rmb = false;
