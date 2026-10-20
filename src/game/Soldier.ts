@@ -346,7 +346,7 @@ export class Soldier {
       this.muzzle.copy(this.fpEye);
       return;
     }
-    const m = gunModel(this.weapon.def, this.weapon.build).muzzle;
+    const m = gunModel(this.weapon.def, this.weapon.build, 1).muzzle;
     const f = m.z + 0.33;
     const sy = Math.sin(this.bodyYaw), cy = Math.cos(this.bodyYaw);
     this.muzzle.set(this.pos.x + sy * f + cy * 0.06, this.pos.y + 1.2 + m.y, this.pos.z + cy * f - sy * 0.06);
