@@ -39,35 +39,82 @@ function flashTexture() {
   return t;
 }
 
-function reticleTexture(kind: 'dot' | 'holo') {
-  const c = document.createElement('canvas');
-  c.width = c.height = 128;
-  const g = c.getContext('2d')!;
-  g.strokeStyle = g.fillStyle = '#fff';
-  if (kind === 'holo') {
-    g.lineWidth = 5;
-    g.beginPath();
-    g.arc(64, 64, 52, 0, Math.PI * 2);
-    g.stroke();
-    for (const a of [0, Math.PI / 2, Math.PI, Math.PI * 1.5]) {
-      g.beginPath();
-      g.moveTo(64 + Math.cos(a) * 52, 64 + Math.sin(a) * 52);
-      g.lineTo(64 + Math.cos(a) * 40, 64 + Math.sin(a) * 40);
-      g.stroke();
-    }
-    g.beginPath();
-    g.arc(64, 64, 6, 0, Math.PI * 2);
-    g.fill();
+/**
+ * Reflex window for red dots and holo sights: faintly tinted glass with a collimated reticle.
+ * The reticle is drawn at infinity along the sight axis (+Z in gun space): each fragment works
+ * out the angle between the eye's ray and the axis, so the dot stays pinned to where the gun
+ * points, only shows when the eye looks down the window, and stays razor sharp at any size
+ * (analytic shapes, anti-aliased with screen derivatives).
+ */
+function lensMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uEye: { value: new THREE.Vector3() },
+      uHalf: { value: new THREE.Vector2(0.01, 0.01) },
+      uRound: { value: 0.01 },
+      uHolo: { value: 0 },
+      uColor: { value: new THREE.Color(7, 0.45, 0.3) },
+      uTint: { value: new THREE.Color(0.3, 0.55, 0.65) },
+    },
+    vertexShader: /* glsl */ `
+varying vec3 vP;
+void main() {
+  vP = position;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`,
+    fragmentShader: /* glsl */ `
+uniform vec3 uEye;
+uniform vec2 uHalf;
+uniform float uRound;
+uniform float uHolo;
+uniform vec3 uColor;
+uniform vec3 uTint;
+varying vec3 vP;
+float line(float d, float w, float px) { return 1.0 - smoothstep(w - px, w + px, d); }
+void main() {
+  // window shape: rounded rectangle (a circle when the rounding is the half size)
+  vec2 q = abs(vP.xy) - uHalf + uRound;
+  float sd = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - uRound;
+  float aw = fwidth(sd);
+  float win = 1.0 - smoothstep(-aw, aw, sd);
+  if (win <= 0.0) discard;
+  // angle off the sight axis, in radians (tangent plane)
+  vec3 d = vP - uEye;
+  vec2 a = d.xy / max(d.z, 1e-4);
+  float px = max(length(fwidth(a)) * 0.6, 1e-6);
+  float r = length(a);
+  float ret, halo;
+  if (uHolo > 0.5) {
+    // 65 MOA ring with four inner ticks around a 1 MOA dot
+    float R = 0.0165, w = max(0.0006, px * 0.8);
+    ret = line(abs(r - R), w, px);
+    vec2 aa = abs(a);
+    float tick = max(line(aa.x, w, px) * step(R * 0.74, aa.y) * step(aa.y, R), line(aa.y, w, px) * step(R * 0.74, aa.x) * step(aa.x, R));
+    ret = max(max(ret, tick), line(r, max(0.0011, px * 1.2), px));
+    halo = exp(-r * r / 0.0000006) * 0.25;
   } else {
-    const grd = g.createRadialGradient(64, 64, 0, 64, 64, 60);
-    grd.addColorStop(0, 'rgba(255,255,255,1)');
-    grd.addColorStop(0.35, 'rgba(255,255,255,1)');
-    grd.addColorStop(0.55, 'rgba(255,255,255,0.25)');
-    grd.addColorStop(1, 'rgba(255,255,255,0)');
-    g.fillStyle = grd;
-    g.fillRect(0, 0, 128, 128);
+    float R = max(0.0017, px * 1.4);
+    ret = line(r, R, px);
+    halo = exp(-r * r / (R * R * 7.0)) * 0.35;
   }
-  return new THREE.CanvasTexture(c);
+  ret *= step(0.0, d.z) * win;
+  halo *= step(0.0, d.z) * win;
+  // glass: a whisper of tint, darker toward the rim of the window
+  float rim = smoothstep(-0.006, 0.0, sd);
+  float ga = (0.05 + 0.1 * rim) * win;
+  vec3 glass = uTint * (0.2 + 0.2 * rim);
+  // premultiplied: the reticle core covers what is behind it, the halo only adds light
+  gl_FragColor = vec4(glass * ga + uColor * (ret + halo), ga + (1.0 - ga) * ret);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}`,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.CustomBlending,
+    blendSrc: THREE.OneFactor,
+    blendDst: THREE.OneMinusSrcAlphaFactor,
+  });
 }
 
 export interface ViewLight {
@@ -103,7 +150,7 @@ class Spring {
  * First-person weapon: its own scene and camera drawn over the world (depth cleared) so the
  * gun never clips into walls and keeps a constant field of view. Handles the pose blend
  * between hip and sights, walk bob, look sway, recoil springs, reloads, swaps, sprinting,
- * muzzle flash, red-dot / holo reticles and lighting matched to where the player stands.
+ * muzzle flash, collimated red-dot / holo reticles and lighting matched to where the player stands.
  */
 export class Viewmodel {
   readonly scene = new THREE.Scene();
@@ -118,9 +165,7 @@ export class Viewmodel {
   private flash = new THREE.Group();
   private flashMat: THREE.MeshBasicMaterial;
   private flashLight = new THREE.PointLight(0xffb060, 0, 2.5, 2);
-  private reticle: THREE.Mesh;
-  private lensGlass: THREE.Mesh;
-  private reticleTex = { dot: reticleTexture('dot'), holo: reticleTexture('holo') };
+  private lens: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>;
   private sun = new THREE.DirectionalLight(0xffffff, 2);
   private hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 1);
   model: GunModel | null = null;
@@ -161,11 +206,10 @@ export class Viewmodel {
     this.flash.visible = false;
     this.flash.renderOrder = 10;
 
-    this.lensGlass = new THREE.Mesh(new THREE.CircleGeometry(1, 20), new THREE.MeshBasicMaterial({ color: 0x5a8ca0, transparent: true, opacity: 0.16, depthWrite: false, side: THREE.DoubleSide }));
-    this.reticle = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: this.reticleTex.dot, color: new THREE.Color(6, 0.5, 0.35), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, side: THREE.DoubleSide }));
-    this.reticle.renderOrder = 12;
-    this.lensGlass.renderOrder = 11;
-    this.gun.add(this.lensGlass, this.reticle);
+    this.lens = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), lensMaterial());
+    this.lens.renderOrder = 11;
+    this.lens.frustumCulled = false;
+    this.gun.add(this.lens);
   }
 
   setWeapon(s: Soldier) {
@@ -198,18 +242,19 @@ export class Viewmodel {
     this.flash.position.copy(model.muzzle);
     const big = w.def.model.bulky ? 1.5 : 1;
     this.flash.scale.setScalar(big * (w.stats.suppressed ? 0.35 : 1));
-    // reticle on the lens
+    // reflex window: sized to the sight's opening, the reticle drawn in the shader
     if (model.reticle) {
-      const mat = this.reticle.material as THREE.MeshBasicMaterial;
-      mat.map = this.reticleTex[model.reticle];
-      mat.color.set(model.reticle === 'dot' ? new THREE.Color(7, 0.45, 0.3) : new THREE.Color(5, 0.6, 0.35));
-      mat.needsUpdate = true;
-      this.reticle.position.copy(model.lens);
-      this.reticle.scale.setScalar(model.reticle === 'dot' ? 0.0042 : 0.017);
-      this.lensGlass.position.copy(model.lens).add(new THREE.Vector3(0, 0, -0.001));
-      this.lensGlass.scale.setScalar(model.lensR);
+      const u = this.lens.material.uniforms;
+      const h = model.lensHalf;
+      this.lens.geometry.dispose();
+      this.lens.geometry = new THREE.PlaneGeometry(h.x * 2 + 0.002, h.y * 2 + 0.002);
+      this.lens.position.copy(model.lens);
+      u.uHalf.value.copy(h);
+      u.uRound.value = model.lensRound;
+      u.uHolo.value = model.reticle === 'holo' ? 1 : 0;
+      u.uColor.value.set(model.reticle === 'dot' ? 0xff2a1c : 0xff3a24).multiplyScalar(model.reticle === 'dot' ? 6 : 4.5);
     }
-    this.reticle.visible = this.lensGlass.visible = !!model.reticle;
+    this.lens.visible = !!model.reticle;
     this.cycleT = 1;
   }
 
@@ -281,8 +326,9 @@ export class Viewmodel {
     // receiver and stock flatten out instead of looming as giant blocks under the reticle
     const relief = m.scoped ? 0.07 : m.reticle ? 0.36 : 0.27;
     this.fovTarget = 52 - (m.scoped ? 0 : 52 * 0.34 * a);
-    // with the cheek on the stock, everything behind the optic sits under the eye: clip it away
-    this.nearTarget = 0.01 + (m.scoped ? 0 : (relief - 0.11) * a * a);
+    // with the cheek on the stock, everything behind the rear sight sits under the eye: clip it
+    // away so the picture is just the sights and the target
+    this.nearTarget = 0.01 + (m.scoped ? 0 : (relief - 0.045) * a * a);
     const hip = { x: 0.118, y: -0.105 - m.sight.y, z: -0.345 + Math.min(0, m.sight.z * 0.3) };
     const sight = { x: m.sight.x, y: -m.sight.y, z: m.sight.z - relief };
     let px = hip.x + (sight.x - hip.x) * a;
@@ -379,6 +425,11 @@ export class Viewmodel {
 
     this.pose.position.set(px, py, pz);
     this.pose.rotation.set(rx, ry, rz, 'YXZ');
+    if (this.lens.visible) {
+      // the eye (camera origin) in the lens's own frame, for the collimated reticle
+      this.pose.updateMatrixWorld(true);
+      this.lens.material.uniforms.uEye.value.set(0, 0, 0).applyMatrix4(tmpM.copy(this.lens.matrixWorld).invert());
+    }
 
     // flash
     this.flashT -= dt;
@@ -407,6 +458,8 @@ export class Viewmodel {
     return !!this.model?.scoped && this.ads > 0.92;
   }
 }
+
+const tmpM = new THREE.Matrix4();
 
 function smooth(a: number, b: number, x: number) {
   const t = clamp((x - a) / (b - a), 0, 1);

@@ -83,7 +83,7 @@ export function buildGunGeometry(def: WeaponDef, build: Build): THREE.BufferGeom
 }
 
 export function gunMuzzleZ(def: WeaponDef, build: Build) {
-  return gunModel(def, build).muzzle.z;
+  return gunModel(def, build, 1).muzzle.z;
 }
 
 export interface SoldierRig {
@@ -186,9 +186,10 @@ export function buildSoldier(team: 0 | 1, isPlayer: boolean): SoldierRig {
 }
 
 export function setRigGun(rig: SoldierRig, def: WeaponDef, build: Build) {
-  // gun geometry is shared through the model cache, so it is never disposed here
+  // gun geometry is shared through the model cache, so it is never disposed here; rigs carry
+  // the light 1 cm copy (the fine model is only built for the player's own hands)
   if (rig.gun) rig.gunMount.remove(rig.gun);
-  const model = gunModel(def, build);
+  const model = gunModel(def, build, 1);
   const g = new THREE.Mesh(model.merged, toyMaterial);
   g.castShadow = true;
   g.receiveShadow = true;
