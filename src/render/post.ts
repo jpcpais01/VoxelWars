@@ -182,6 +182,7 @@ uniform vec3 uMistCol;
 uniform vec3 uSkyTop;
 uniform vec3 uSunDisc;
 uniform float uUnder;
+uniform float uViewDist;
 
 float mhash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float mnoise(vec2 p) {
@@ -293,7 +294,12 @@ void main() {
   // forward scattering: the haze glows toward the sun
   fc += uSunFog * pow(sd, 24.0) * 0.4;
   if (d >= 0.99999) col = skyColor(rd, camP);
-  else col = mix(col, fc, clamp(fogAmt, 0.0, 1.0));
+  else {
+    col = mix(col, fc, clamp(fogAmt, 0.0, 1.0));
+    // the end of the render distance melts into the sky behind it
+    float fade = smoothstep(uViewDist * 0.6, uViewDist, dist);
+    if (fade > 0.0) col = mix(col, skyColor(rd, camP), fade);
+  }
 
   // low valley mist: pools just above the waterline and drifts with the wind
   if (uMist > 0.0 && d < 0.99999) {

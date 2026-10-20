@@ -202,6 +202,7 @@ export class Renderer {
       uSkyTop: { value: new THREE.Color(0x5d9ad6) },
       uSunDisc: { value: new THREE.Color(0xffe9c9) },
       uUnder: { value: 0 },
+      uViewDist: { value: 400 },
     });
     this.addSkirt();
   }
@@ -243,6 +244,16 @@ export class Renderer {
       this.water.uniforms.uSkyHor.value.setHex(L.skyHor);
     }
     this.shadowForce = true;
+  }
+
+  /** metres the camera sees; the world fades into the sky before it ends */
+  viewDist = 400;
+
+  setViewDistance(d: number) {
+    this.viewDist = d;
+    this.camera.far = d + 20;
+    this.camera.updateProjectionMatrix();
+    this.compMat.uniforms.uViewDist.value = d;
   }
 
   setWater(w: Water) {
