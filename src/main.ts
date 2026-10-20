@@ -442,6 +442,7 @@ $('e-menu').addEventListener('click', () => location.reload());
 function setPaused(p: boolean) {
   if (state !== 'playing' || game.over) return;
   paused = p;
+  audio.setPaused(p);
   syncPauseOverlay();
   if (p) {
     input.keys.clear();
@@ -461,6 +462,7 @@ window.addEventListener('keydown', (e) => {
   else setPaused(!paused);
 });
 document.addEventListener('visibilitychange', () => {
+  audio.setHidden(document.hidden);
   if (document.hidden && state === 'playing' && !game.over) setPaused(true);
 });
 
