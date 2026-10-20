@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { GRAVITY, SOLDIER_HEIGHT, SOLDIER_RADIUS, STEP_HEIGHT, Team, WATER_Y } from '../core/config';
+import { GRAVITY, SOLDIER_HEIGHT, SOLDIER_RADIUS, STEP_HEIGHT, Team, VOXEL, WATER_Y } from '../core/config';
 import { angleDiff, clamp, damp } from '../core/noise';
 import type { Game } from './Game';
 import { SoldierRig, buildSoldier, setRigGun } from './models';
@@ -145,6 +145,18 @@ export class Soldier {
     this.rig.laser.visible = this.weapon.stats.laser;
   }
 
+  /** reload foley, timed to the animation; it stops if the reload is cut short */
+  private reloadSound(game: Game) {
+    const w = this.weapon;
+    const rounds = Math.min(w.stats.mag - w.ammo, w.reserve);
+    game.audio.reload(w.def.id, this.pos, this.isPlayer, w.stats.reload, rounds, () => this.alive && this.weapon === w && w.reloadT > 0);
+  }
+
+  /** material under the feet (for footstep sounds) */
+  private groundMat(game: Game) {
+    return game.world.get(Math.floor(this.pos.x / VOXEL), Math.floor((this.pos.y - 0.1) / VOXEL), Math.floor(this.pos.z / VOXEL));
+  }
+
   startReload() {
     const w = this.weapon;
     if (w.reloading || w.ammo >= w.stats.mag || w.reserve <= 0) return false;
@@ -188,7 +200,9 @@ export class Soldier {
     // aim + facing (the player's heading comes straight from the camera)
     const dx = it.aim.x - this.pos.x, dz = it.aim.z - this.pos.z;
     if (!this.isPlayer && dx * dx + dz * dz > 0.01) this.yaw = Math.atan2(dx, dz);
+    const wasAds = this.ads;
     this.ads = it.ads && !this.sprinting;
+    if (this.isPlayer && this.ads !== wasAds) game.audio.ads(this.ads);
     const wantSprint = it.sprint && !it.fire && Math.hypot(it.moveX, it.moveZ) > 0.3;
     this.sprinting = wantSprint && !this.ads;
 
@@ -203,7 +217,7 @@ export class Soldier {
     if (it.jump && this.onGround && this.waterDepth < 0.9) {
       this.vel.y = 7.4;
       this.onGround = false;
-      game.audio.foot(this.pos, 1.4);
+      game.audio.foot(this.pos, 1.4, this.groundMat(game), this.isPlayer);
     }
     this.vel.y -= GRAVITY * dt;
     if (this.waterDepth > 0.9) this.vel.y = Math.max(this.vel.y, -1.5);
@@ -222,7 +236,7 @@ export class Soldier {
           game.renderer.water?.addRipple(this.pos.x, this.pos.z, 0.6);
           game.particles.splash(this.pos.x, WATER_Y, this.pos.z, 3, 0.4);
           game.audio.splash(this.pos, 0.3);
-        } else game.audio.foot(this.pos, 1);
+        } else game.audio.foot(this.pos, 1, this.groundMat(game), this.isPlayer, this.sprinting);
       }
     } else this.walkPhase *= Math.exp(-dt * 6);
     if (this.waterDepth > 0.05 && hs < 0.5) {
@@ -243,14 +257,16 @@ export class Soldier {
 
     // weapon switching
     if (it.switchTo >= 0) {
+      const was = this.current;
       this.switchWeapon(it.switchTo);
+      if (this.isPlayer && this.current !== was) game.audio.draw(this.weapon.def.id);
       it.switchTo = -1;
     }
     if (this.switchT > 0) this.switchT -= dt;
 
     // reload
     if (it.reload) {
-      if (this.startReload()) game.audio.reload(this.pos, this.isPlayer);
+      if (this.startReload()) this.reloadSound(game);
       it.reload = false;
     }
     if (w.reloadT > 0) {
@@ -261,7 +277,6 @@ export class Soldier {
         w.ammo += take;
         w.reserve -= take;
         w.reloadT = 0;
-        if (this.isPlayer) game.audio.uiClick(0.6);
       }
     }
     w.cooldown -= dt;
@@ -285,13 +300,14 @@ export class Soldier {
     if (s.spinUp > 0) {
       if (it.fire && !this.sprinting) w.spin = Math.min(1, w.spin + dt / s.spinUp);
       else w.spin = Math.max(0, w.spin - dt / (s.spinUp * 1.5));
+      game.audio.spin(w, this.pos, w.spin, this.isPlayer);
     }
     const canFire = it.fire && !this.sprinting && !w.reloading && this.switchT <= 0 && (s.spinUp <= 0 || w.spin >= 1);
     if (!it.fire) w.triggerLatch = false;
     if (canFire && w.cooldown <= 0) {
       if (w.ammo <= 0) {
-        if (this.startReload()) game.audio.reload(this.pos, this.isPlayer);
-        else if (!w.triggerLatch) game.audio.dryFire(this.pos);
+        if (this.startReload()) this.reloadSound(game);
+        else if (!w.triggerLatch) game.audio.dryFire(this.pos, this.isPlayer);
         w.triggerLatch = true;
       } else if (s.auto || !w.triggerLatch) {
         w.triggerLatch = true;
@@ -301,8 +317,7 @@ export class Soldier {
         game.fireWeapon(this, w);
         w.bloom = Math.min(w.bloom + s.recoil * 0.8, s.recoil * 7 + 0.03);
         if (w.ammo <= 0 && w.reserve > 0) {
-          this.startReload();
-          game.audio.reload(this.pos, this.isPlayer);
+          if (this.startReload()) this.reloadSound(game);
         }
       }
     }
@@ -385,7 +400,7 @@ export class Soldier {
     if (this.vel.y <= 0) {
       const top = world.boxTop(p.x - r * 0.9, ny, p.z - r * 0.9, p.x + r * 0.9, p.y + 0.02, p.z + r * 0.9);
       if (top >= 0 && top >= ny) {
-        if (!this.onGround && this.vel.y < -9) game.audio.foot(this.pos, 1.6);
+        if (!this.onGround && this.vel.y < -9) game.audio.foot(this.pos, 1.6, world.get(Math.floor(p.x / VOXEL), Math.floor((top - 0.1) / VOXEL), Math.floor(p.z / VOXEL)), this.isPlayer);
         p.y = top;
         this.vel.y = 0;
         this.onGround = true;

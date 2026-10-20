@@ -39,6 +39,7 @@ interface Proj {
   wet: boolean;
   trailT: number;
   weaponName: string;
+  whizzed?: boolean;
 }
 
 interface Smoke {
@@ -87,6 +88,7 @@ const tmpD = new THREE.Vector3();
 const tmpR = new THREE.Vector3();
 const tmpU = new THREE.Vector3();
 const hit = newHit();
+const occHit = newHit();
 const tmpQ = new THREE.Quaternion();
 
 export class Game {
@@ -148,12 +150,20 @@ export class Game {
     this.particles = new Particles(renderer.fxScene);
     this.debris = new Debris(world, scene);
     this.nav = new Nav(world);
+    // sound behind solid walls is muffled; foliage only dulls it a little
+    audio.occlusion = (x, y, z) => {
+      const l = audio.listener;
+      const dx = x - l.x, dy = y - l.y, dz = z - l.z;
+      const d = Math.hypot(dx, dy, dz);
+      if (d < 1 || !this.world.raycast(l.x, l.y, l.z, dx / d, dy / d, dz / d, d - 0.8, occHit)) return 0;
+      return MATS[occHit.mat]?.kind === 'leaf' ? 0.3 : 1;
+    };
     this.destruction = new Destruction(world, scene, this.particles, this.debris, {
       onBarrel: (x, y, z, size) => this.explode(x, y, z, 3.6 + size * 0.05, 110, 2.2 + Math.min(1.2, size * 0.06), null, 'Fuel barrel'),
       onTopple: (x, y, z, tree) => this.audio.creak(new THREE.Vector3(x, y, z), tree),
       onBodyImpact: (x, y, z, size, minX, minZ, maxX, maxZ, tree) => {
         const p = new THREE.Vector3(x, y, z);
-        this.audio.crash(p, size);
+        this.audio.crash(p, size, tree);
         this.addShake(p, Math.min(1.2, size / 500));
         // crush anyone underneath
         for (const s of this.soldiers) {
@@ -286,7 +296,7 @@ export class Game {
     const m = s.muzzle;
     // muzzle inside a wall? fire from the chest instead
     if (this.world.solidAt(m.x, m.y, m.z)) m.set(s.pos.x, s.pos.y + 1.25, s.pos.z);
-    this.audio.gunshot(m, def.sound, st.suppressed, s.isPlayer);
+    this.audio.gunshot(def.id, m, { suppressed: st.suppressed, loud: st.loud, isPlayer: s.isPlayer, left: w.ammo, mag: st.mag, owner: s.pos, valid: () => s.alive && s.weapon === w });
     this.noises.push({ x: m.x, z: m.z, t: this.time, team: s.team, radius: (st.suppressed ? 9 : 42) * st.loud });
     if (!st.suppressed) s.spottedUntil = Math.max(s.spottedUntil, this.time + 1.5);
     if (s.isPlayer) {
@@ -340,7 +350,10 @@ export class Game {
         mesh.position.copy(p.pos);
         this.renderer.scene.add(mesh);
         p.mesh = mesh;
-        if (kind === 'rocket') this.renderer.flashAt(m.x, m.y, m.z, 14, 0xffa050, 0.2);
+        if (kind === 'rocket') {
+          this.renderer.flashAt(m.x, m.y, m.z, 14, 0xffa050, 0.2);
+          this.audio.rocket(p);
+        }
       }
       this.projectiles.push(p);
     }
@@ -351,7 +364,7 @@ export class Game {
       // detonate all placed charges
       for (const p of this.projectiles) if (p.kind === 'c4' && p.owner === s && !p.dead) p.fuse = 0.05;
       s.c4 = [];
-      this.audio.beep(s.pos);
+      this.audio.detonator(s.isPlayer, s.pos);
       return;
     }
     if (s.itemCount <= 0) return;
@@ -359,7 +372,7 @@ export class Game {
       if (s.hp >= 100) return;
       s.itemCount--;
       s.healLeft = 70;
-      this.audio.uiClick(1);
+      this.audio.medkit(s.pos, s.isPlayer);
       this.particles.add.spawn({ x: s.pos.x, y: s.pos.y + 1.2, z: s.pos.z, vy: 1.2, size: 0.5, life: 0.8, r: 0.4, g: 3, b: 0.8 });
       return;
     }
@@ -404,7 +417,7 @@ export class Game {
     const p: Proj = { kind, pos: from, vel, owner: s, team: s.team, stats: null, dmg: 0, traveled: 0, life: kind === 'c4' ? 240 : 8, fuse: kind === 'frag' ? 2.3 : kind === 'smoke' ? 1.4 : 1e9, mesh, stuck: false, dead: false, wet: false, trailT: 0, weaponName: kind === 'frag' ? 'Frag' : 'Demo Charge' };
     if (kind === 'c4') s.c4.push(mesh);
     this.projectiles.push(p);
-    this.audio.throwSnd(s.pos);
+    this.audio.throwSnd(s.pos, kind, s.isPlayer);
   }
 
   private hitSoldierRay(p: Proj, dir: THREE.Vector3, len: number) {
@@ -465,10 +478,25 @@ export class Game {
       if (this.world.floorAt(wx, wz) < WATER_Y || this.nav.h[k] * VOXEL < WATER_Y) {
         this.particles.splash(wx, WATER_Y, wz, 6, 0.7);
         this.renderer.water?.addRipple(wx, wz, 0.8);
+        this.audio.impact(tmpV.set(wx, WATER_Y, wz), 'water');
         p.wet = true;
       }
     }
     if (p.wet) p.vel.multiplyScalar(Math.exp(-dt * 25));
+    // close passes crack and whiz past the listener's head
+    if (!p.whizzed && !p.owner.isPlayer && !p.wet) {
+      const l = this.audio.listener;
+      const ox = l.x - p.pos.x, oy = l.y - p.pos.y, oz = l.z - p.pos.z;
+      const along = ox * dir.x + oy * dir.y + oz * dir.z;
+      if (along > -1 && along < len + 1) {
+        const tc = Math.max(0, Math.min(len, along));
+        const cx = p.pos.x + dir.x * tc, cy = p.pos.y + dir.y * tc, cz = p.pos.z + dir.z * tc;
+        if ((cx - l.x) ** 2 + (cy - l.y) ** 2 + (cz - l.z) ** 2 < 2.4 * 2.4) {
+          p.whizzed = true;
+          this.audio.whiz(tmpV.set(cx, cy, cz), speed > 225);
+        }
+      }
+    }
     let guard = 0;
     while (len > 0 && guard++ < 6) {
       const sh = this.hitSoldierRay(p, dir, len);
@@ -530,6 +558,7 @@ export class Game {
         this.damageCore(coreHit, p.dmg * 0.55 * falloff, p.owner, cp);
         if (st.explosive > 0) this.explode(cp.x, cp.y, cp.z, st.explosive, st.blastDamage, st.voxRadius, p.owner, p.weaponName);
         this.particles.sparks(cp.x, cp.y, cp.z, -dir.x, 0.3, -dir.z, 5, 1.5);
+        this.audio.impact(cp, 'metal');
         if (p.owner.isPlayer) this.ev.onHitMarker(false, false);
         this.kill(p);
         return;
@@ -619,7 +648,7 @@ export class Game {
           p.mesh.lookAt(p.pos.x + hit.nx, p.pos.y + hit.ny, p.pos.z + hit.nz);
           p.mesh.rotateX(Math.PI / 2);
         }
-        this.audio.beep(p.pos);
+        this.audio.stick(p.pos);
         return;
       } else {
         // bounce
@@ -628,7 +657,7 @@ export class Game {
         if (hit.ny) p.vel.y *= -0.35;
         if (hit.nz) p.vel.z *= -0.4;
         p.vel.multiplyScalar(0.75);
-        if (speed > 3) this.audio.impact(p.pos, 'metal');
+        if (speed > 3) this.audio.bounce(p.pos, speed);
         if (hit.ny > 0 && Math.abs(p.vel.y) < 1.2) {
           p.vel.y = 0;
           p.vel.x *= 0.8;
@@ -662,7 +691,7 @@ export class Game {
     this.kill(p);
     if (p.kind === 'smoke') {
       this.smokes.push({ x: p.pos.x, y: p.pos.y, z: p.pos.z, t: 0, life: 14, emit: 0 });
-      this.audio.throwSnd(p.pos);
+      this.audio.smoke(p.pos);
       return;
     }
     if (p.kind === 'frag') return this.explode(p.pos.x, p.pos.y + 0.2, p.pos.z, 4.4, 115, 1.9, p.owner, 'Frag');
@@ -711,6 +740,7 @@ export class Game {
     if (Math.abs(y - WATER_Y) < 2 && this.world.floorAt(x, z) < WATER_Y) {
       this.particles.splash(x, WATER_Y, z, 30, 2.2);
       this.renderer.water?.addRipple(x, z, 3);
+      this.audio.splash(pos, 2);
     }
     this.noises.push({ x, z, t: this.time, team: owner ? owner.team : 0, radius: 60 });
     this.nav.addDanger(x, z, 2, radius + 2);
@@ -746,6 +776,7 @@ export class Game {
       }
     }
     if (s.isPlayer && dmg > 0) {
+      this.audio.hurt(dmg, dir, killed);
       this.ev.onPlayerHurt(dir, dmg);
       this.renderer.hurt = Math.min(1, this.renderer.hurt + dmg / 60);
     }
@@ -1064,6 +1095,7 @@ export class Game {
     // audio listener at the eye, panning relative to the view
     this.audio.listener.copy(cam.position);
     this.audio.listenerYaw = pc.yaw;
+    this.audio.vitals(p.alive ? p.hp : 100);
     const lp = cam.position;
     const rz = this.info.riverZ(lp.x);
     const dRiver = Math.min(Math.abs(lp.z - rz), Math.hypot(lp.x - MAP_W / 2, lp.z - MAP_D / 2) - 8);

@@ -323,6 +323,14 @@ document.querySelectorAll<HTMLElement>('[data-close]').forEach((b) =>
   }),
 );
 
+// armoury foley: attachments click into place, guns are picked up, everything else ticks
+$('loadout').addEventListener('click', (e) => {
+  const t = e.target as HTMLElement;
+  if (t.closest('[data-att]')) audio.attach();
+  else if (t.closest('[data-weapon]')) audio.draw('');
+  else if (t.closest('button')) audio.uiClick(0.8);
+});
+
 function openLoadout() {
   audio.uiClick();
   input.enabled = false;
@@ -408,6 +416,11 @@ const unlockAudio = () => {
 };
 window.addEventListener('pointerdown', unlockAudio, { once: true });
 window.addEventListener('keydown', unlockAudio, { once: true });
+// a soft tick when the pointer moves onto a menu button
+document.addEventListener('pointerover', (e) => {
+  const b = (e.target as HTMLElement).closest?.('button, .wcard, .att, [data-v]');
+  if (b && !b.contains(e.relatedTarget as Node | null)) audio.uiHover();
+});
 
 $('btn-deploy').addEventListener('click', () => deploy());
 $('btn-loadout').addEventListener('click', openLoadout);
@@ -489,7 +502,7 @@ document.querySelectorAll<HTMLElement>('[data-tap]').forEach((b) => {
 function deploy() {
   if (state !== 'menu') return;
   unlockAudio();
-  audio.uiClick();
+  audio.deploy();
   state = 'playing';
   $('menu').classList.add('hidden');
   $('hud').classList.remove('hidden');
