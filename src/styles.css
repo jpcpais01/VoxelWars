@@ -1709,3 +1709,73 @@ body.touch #feed {
     font-size: 12px;
   }
 }
+
+/* fullscreen toggle: top-right corner on every screen except live play */
+#btn-fullscreen {
+  position: fixed;
+  top: max(14px, env(safe-area-inset-top));
+  right: max(14px, env(safe-area-inset-right));
+  z-index: 30;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: background 0.15s ease, border-color 0.15s, transform 0.12s ease;
+}
+#btn-fullscreen:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.28);
+  transform: scale(1.06);
+}
+#btn-fullscreen.hidden,
+body.playing #btn-fullscreen {
+  display: none;
+}
+#btn-fullscreen svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+#btn-fullscreen .fs-exit,
+#btn-fullscreen.on .fs-enter {
+  display: none;
+}
+#btn-fullscreen.on .fs-exit {
+  display: block;
+}
+
+/* shown while playing with a mouse that isn't captured yet */
+#lock-hint {
+  position: absolute;
+  top: 58%;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text);
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+body.needs-lock #lock-hint {
+  opacity: 1;
+}

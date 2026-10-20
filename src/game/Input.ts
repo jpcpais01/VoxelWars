@@ -27,8 +27,10 @@ export class Input {
   lookDY = 0;
   /** pointer is captured for mouse look */
   locked = false;
-  /** pointer lock unavailable: look with the plain mouse instead */
+  /** this browser has no pointer lock at all: look with the plain mouse instead */
   freeLook = false;
+  /** called whenever capture is gained, lost or refused */
+  onLockChange: () => void = () => {};
   private lookX = 0;
   private lookY = 0;
   private stickR = 60;
@@ -49,8 +51,11 @@ export class Input {
     document.addEventListener('pointerlockchange', () => {
       this.locked = document.pointerLockElement === el;
       if (!this.locked) this.lmb = this.rmb = false;
+      this.onLockChange();
     });
-    document.addEventListener('pointerlockerror', () => (this.freeLook = true));
+    // a refused capture (no click behind it, or the browser's cooldown right after Esc) is not
+    // final: stay unlocked and capture on the next click, never fall back to edge-bound mouse look
+    document.addEventListener('pointerlockerror', () => this.onLockChange());
     window.addEventListener('mousemove', (e) => {
       if (e.movementX || e.movementY) this.touch = false;
       this.mouseX = e.clientX;
@@ -95,14 +100,22 @@ export class Input {
   }
 
   capture() {
-    if (this.touch || this.locked) return;
-    try {
-      const r = this.el.requestPointerLock?.() as unknown as Promise<void> | undefined;
-      if (r && typeof r.catch === 'function') r.catch(() => (this.freeLook = true));
-      else if (!this.el.requestPointerLock) this.freeLook = true;
-    } catch {
+    if (this.touch || this.locked || this.freeLook) return;
+    if (!this.el.requestPointerLock) {
       this.freeLook = true;
+      return;
     }
+    try {
+      const r = this.el.requestPointerLock() as unknown as Promise<void> | undefined;
+      if (r && typeof r.catch === 'function') r.catch(() => this.onLockChange());
+    } catch {
+      this.onLockChange();
+    }
+  }
+
+  /** playing with a mouse but the pointer is not captured yet: the next click captures it */
+  get needsCapture() {
+    return this.enabled && !this.touch && !this.locked && !this.freeLook;
   }
 
   release() {
