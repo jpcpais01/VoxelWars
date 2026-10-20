@@ -361,7 +361,8 @@ export async function generateWorld(world: World, seed: number, progress: Prog):
         for (let dy = -ri; dy <= ri; dy++)
           for (let dz = -ri; dz <= ri; dz++) {
             const x = Math.floor(px + dx), y = Math.floor(py + dy), z = Math.floor(pz + dz);
-            if ((x + 0.5 - px) ** 2 + (y + 0.5 - py) ** 2 + (z + 0.5 - pz) ** 2 > Math.max(0.3, r * r)) continue;
+            // at least ~0.74 voxels wide, so thin branches stay face-connected and carry their leaves
+            if ((x + 0.5 - px) ** 2 + (y + 0.5 - py) ** 2 + (z + 0.5 - pz) ** 2 > Math.max(0.55, r * r)) continue;
             if (onlyAir) putIfAir(x, y, z, m);
             else put(x, y, z, m);
           }
@@ -725,7 +726,9 @@ export async function generateWorld(world: World, seed: number, progress: Prog):
         const sag = Math.round(1.6 * Math.sin(((x + 5) / 22) * Math.PI) * Math.sin(((z + 3) / 28) * Math.PI));
         if (hash2(x + sx0, z + sz0, 44) < 0.22) continue;
         const [wx, wz] = sp.w(sx0 + x, sz0 + z);
-        put(wx, oy + 14 - sag, wz, hash2(x, z, 45) < 0.5 ? M.CANVAS : M.BUSH);
+        // a canvas sheet with leafy tufts tucked into it (leaves alone can't hold the net together)
+        put(wx, oy + 14 - sag, wz, M.CANVAS);
+        if (hash2(x, z, 45) < 0.5) putIfAir(wx, oy + 15 - sag, wz, M.BUSH);
       }
 
     // tents at back: smooth canvas slopes, ridge pole, team patch, cots inside
@@ -1355,6 +1358,18 @@ export async function generateWorld(world: World, seed: number, progress: Prog):
         putIfAir(wx, y0 + Math.ceil(rad * 2) , wz, M.MOSS);
       }
     }
+    // bank soil up under it where the slope falls away, so it lies on the ground along its length
+    for (let i = 0; i < len; i++)
+      for (let a = -3; a <= 3; a++) {
+        const wx = alongX ? x + i : x + a, wz = alongX ? z + a : z + i;
+        if (wx < 0 || wz < 0 || wx >= WX || wz >= WZ) continue;
+        const base = (wx * WZ + wz) * WY;
+        const gr = world.ground[wx * WZ + wz];
+        let low = -1;
+        for (let y = gr; y < y0 + 6 && y < WY; y++) if (vox[base + y] === M.OAK_BARK || vox[base + y] === M.LOG_END) { low = y; break; }
+        if (low < 0 || low - gr > 8) continue;
+        for (let y = gr; y < low; y++) if (vox[base + y] === 0) vox[base + y] = M.DIRT;
+      }
     // a broken branch stub
     const si = 3 + Math.floor(r() * (len - 6));
     const sx = alongX ? x + si : x, sz = alongX ? z : z + si;
@@ -1381,6 +1396,21 @@ export async function generateWorld(world: World, seed: number, progress: Prog):
           if (mossy && ey > 0.25 && d > 0.6) m = hash3(bx, by, bz, 4) < 0.7 ? M.MOSS : M.MOSSY;
           putIfAir(bx, by, bz, m);
         }
+    // seat it: fill the gaps under its belly down to the slope so it rests on the ground, not on a
+    // few voxels (an overhanging lobe would otherwise snap off the moment anything nearby breaks)
+    for (let bx = Math.floor(cx - rx * g); bx <= Math.ceil(cx + rx * g); bx++)
+      for (let bz = Math.floor(cz - rz * g); bz <= Math.ceil(cz + rz * g); bz++) {
+        if (bx < 0 || bz < 0 || bx >= WX || bz >= WZ) continue;
+        const base = (bx * WZ + bz) * WY;
+        const gr = world.ground[bx * WZ + bz];
+        let low = -1;
+        for (let by = gr; by <= Math.ceil(cy + ry * g) && by < WY; by++) {
+          const m = vox[base + by];
+          if (m === M.STONE || m === M.CLIFF || m === M.MOSSY) { low = by; break; }
+        }
+        if (low < 0 || low - gr > 8) continue;
+        for (let by = gr; by < low; by++) if (vox[base + by] === 0) vox[base + by] = M.CLIFF;
+      }
   };
 
   const stump = (x: number, y0: number, z: number, r: () => number) => {
@@ -1416,6 +1446,8 @@ export async function generateWorld(world: World, seed: number, progress: Prog):
         const s = surf[k];
         const y0 = groundTop(x, z);
         if (y0 <= WATER_VOX + 2) continue;
+        // something already grows here: planting on top of it left trees standing on other crowns
+        if (y0 > world.ground[k]) continue;
         const f = forest[Lk(x, z)];
         const lx = x / S, lz = z / S;
         const edge = Math.min(lx, lz, LW - 1 - lx, LD - 1 - lz);
@@ -1462,9 +1494,9 @@ export async function generateWorld(world: World, seed: number, progress: Prog):
   const isr = mulberry32(seed + 5);
   {
     const x = Math.round(C * S) + 12, z = Math.round(C * S) - 9;
-    birch(x, groundTop(x, z), z, isr);
+    birch(x, world.ground[x * WZ + z], z, isr);
     const x2 = WX - 1 - x, z2 = WZ - 1 - z;
-    birch(x2, groundTop(x2, z2), z2, isr);
+    birch(x2, world.ground[x2 * WZ + z2], z2, isr);
   }
   // flowers/bushes ring around bases (soft decoration)
   for (const bc of [blueBase, redBase]) {
@@ -1475,7 +1507,7 @@ export async function generateWorld(world: World, seed: number, progress: Prog):
       if (x < 4 || z < 4 || x >= WX - 4 || z >= WZ - 4) continue;
       if (pathField[Lk(x, z)] < 4) continue;
       const y0 = groundTop(x, z);
-      if (y0 <= WATER_VOX + 2) continue;
+      if (y0 <= WATER_VOX + 2 || y0 > world.ground[x * WZ + z]) continue;
       if (hash2(i, bc.z) < 0.6) bush(x, y0, z, isr);
       else boulder(x, y0, z, isr);
     }
