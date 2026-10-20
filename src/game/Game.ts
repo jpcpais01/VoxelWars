@@ -703,13 +703,9 @@ export class Game {
       if (d < radius * 1.35) this.damageCore(c, damage * 1.45 * Math.pow(1 - d / (radius * 1.35), 0.6), owner, pos);
     }
     // visuals
-    const n = Math.round(6 + radius * 3);
-    for (let i = 0; i < n; i++) this.particles.fire(x + (Math.random() - 0.5) * radius * 0.4, y + Math.random() * 0.4, z + (Math.random() - 0.5) * radius * 0.4, radius * 0.4);
-    for (let i = 0; i < n * 0.7; i++) this.particles.smoke(x + (Math.random() - 0.5) * radius * 0.6, y + Math.random(), z + (Math.random() - 0.5) * radius * 0.6, radius * 0.55, 0.22 + Math.random() * 0.15, 3.5 + radius * 0.4);
-    this.particles.sparks(x, y, z, 0, 1, 0, Math.round(radius * 5), 1.5);
     const gy = this.world.groundBelow(x, y + 0.5, z);
-    if (y - gy < 1.5) this.particles.dust(x, gy + 0.1, z, 0.55, 0.47, 0.36, Math.round(radius * 3), radius * 0.6);
-    this.renderer.flashAt(x, y + 1, z, 40 * radius, 0xffa050, 0.35);
+    this.particles.explosion(x, y, z, radius, y - gy < 1.5 ? gy : NaN);
+    this.renderer.flashAt(x, y + 0.8, z, 75 * radius, 0xffb060, 0.28);
     this.audio.explosion(pos, radius / 3.5);
     this.addShake(pos, radius / 3);
     if (Math.abs(y - WATER_Y) < 2 && this.world.floorAt(x, z) < WATER_Y) {

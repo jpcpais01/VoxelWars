@@ -293,9 +293,22 @@ export class Destruction {
     const w = this.world;
     const ir = r / VOXEL;
     const vx = cx / VOXEL, vy = cy / VOXEL, vz = cz / VOXEL;
-    const x0 = Math.max(0, Math.floor(vx - ir - 2)), x1 = Math.min(WX - 1, Math.ceil(vx + ir + 2));
+    // every blast gets its own shape: a few broad lobes make it lopsided and stretched
+    const lobes: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      const u = Math.random() * 2 - 1, t = Math.random() * 6.283, h = Math.sqrt(1 - u * u);
+      lobes.push(h * Math.cos(t), u, h * Math.sin(t), (Math.random() - 0.5) * 0.36, (Math.random() - 0.5) * 0.5);
+    }
+    const ox = (Math.random() * 4096) | 0, oz = (Math.random() * 4096) | 0;
+    // on (or just above) the ground the blast vents sideways: a wide, shallow bowl instead of a ball
+    let below = 0;
+    const scanX = Math.floor(vx), scanZ = Math.floor(vz);
+    while (below < ir && w.get(scanX, Math.floor(vy) - below, scanZ) === 0) below++;
+    const flat = Math.max(0, 1 - below / Math.max(1, ir * 0.9));
+    const ext = 1 + flat * 0.15;
+    const x0 = Math.max(0, Math.floor(vx - ir * ext - 2)), x1 = Math.min(WX - 1, Math.ceil(vx + ir * ext + 2));
     const y0 = Math.max(1, Math.floor(vy - ir - 2)), y1 = Math.min(WY - 1, Math.ceil(vy + ir + 2));
-    const z0 = Math.max(0, Math.floor(vz - ir - 2)), z1 = Math.min(WZ - 1, Math.ceil(vz + ir + 2));
+    const z0 = Math.max(0, Math.floor(vz - ir * ext - 2)), z1 = Math.min(WZ - 1, Math.ceil(vz + ir * ext + 2));
     let removed = 0;
     const cands: number[] = [];
     for (let x = x0; x <= x1; x++)
@@ -304,19 +317,35 @@ export class Destruction {
           const i = w.idx(x, y, z);
           const m = w.vox[i];
           if (m === 0) continue;
-          const dx = x + 0.5 - vx, dy = y + 0.5 - vy, dz = z + 0.5 - vz;
-          const d = Math.sqrt(dx * dx + dy * dy + dz * dz) / ir;
-          const jitter = hash3(x, y, z, 99) * 0.3;
           const hp = MATS[m].hp;
           if (hp <= 0) continue;
-          const resist = hp >= 14 ? 0.18 : hp >= 10 ? 0.08 : 0;
-          if (d < 1 - jitter * 0.6 - resist) {
+          let dx = x + 0.5 - vx, dy = y + 0.5 - vy, dz = z + 0.5 - vz;
+          const len = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+          const nx = dx / len, ny = dy / len, nz = dz / len;
+          let shape = 1;
+          for (let k = 0; k < 15; k += 5) {
+            const c = nx * lobes[k] + ny * lobes[k + 1] + nz * lobes[k + 2];
+            shape += lobes[k + 3] * c + lobes[k + 4] * (c * c - 0.33);
+          }
+          if (dy < 0) dy *= 1 + flat * 0.8;
+          dx /= ext;
+          dz /= ext;
+          const d = Math.sqrt(dx * dx + dy * dy + dz * dz) / ir;
+          // soft things go further than stone and steel
+          const reach = Math.max(0.68, Math.min(1.1, 1.12 - hp * 0.02));
+          // chunky breakup at two voxel scales so the rim is jagged, not stair-stepped
+          const rough = (hash3((x >> 1) + ox, y >> 1, (z >> 1) + oz, 17) - 0.5) * 0.22 + (hash3(x + ox, y, z + oz, 99) - 0.5) * 0.1;
+          const edge = reach * shape + rough - 0.05;
+          if (d < edge) {
             cands.push(i);
-          } else if (d < 1.35) {
+          } else if (d < edge + 0.2 && MATS[m].kind !== 'metal' && hash3(x + oz, y, z + ox, 5) < 0.22) {
+            // loose rim: a few voxels just past the edge are knocked out too
+            cands.push(i);
+          } else if (d < edge + 0.4) {
             // scorch / loosen the rim
             if (m === M.GRASS || m === M.FLOWER_BED) w.set(x, y, z, M.DIRT);
             else if ((m === M.SAND || m === M.PATH) && hash3(x, y, z, 7) < 0.5) w.set(x, y, z, M.MUD);
-            else if (d < 1.15 && hp > 0) {
+            else if (d < edge + 0.15) {
               const acc = (w.damage.get(i) ?? 0) + hp * 0.5;
               w.damage.set(i, acc);
             }
