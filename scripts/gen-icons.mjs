@@ -1,5 +1,8 @@
 // Generates every VoxelWars app icon from chunky extruded voxel pixel art.
 // Several designs live here; ICON=<name> picks one (default below):
+//   forest  a soldier silhouette with a rifle among misty pine trunks and sunbeams
+//   meadow  a combat helmet with leaf sprigs resting in a poppy meadow below the pines
+//   marker  a rifle planted in the ground with a helmet on it, pines against a dusk sun
 //   grenade a pineapple frag grenade on an orange sunburst
 //   tank    a little voxel tank under a blue sky
 //   boom    a spiky voxel explosion throwing blocks
@@ -12,7 +15,7 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 
-const DESIGN = process.env.ICON || 'grenade';
+const DESIGN = process.env.ICON || 'forest';
 const V = 512;
 
 const hexToRgb = (h) => [(h >> 16) & 255, (h >> 8) & 255, h & 255];
@@ -100,8 +103,147 @@ const COMMON_DEFS = `
 /** build pixel rows from a function (x, y) -> char */
 const grid = (w, h, fn) => Array.from({ length: h }, (_, y) => Array.from({ length: w }, (_, x) => fn(x, y) || '.').join(''));
 
+/** pixel grass strip with tufts and a few flowers along y = base */
+function meadow(base, step, { grass = '#5f9a3a', dark = '#3f6e2a', flowers = 0, seed = 3 } = {}) {
+  let out = `<rect x="0" y="${base}" width="${V}" height="${V - base}" fill="${grass}"/>`;
+  for (let x = 0, i = 0; x < V; x += step, i++) {
+    const h = hash(i, seed);
+    if (h > 0.55) out += `<rect x="${x}" y="${base - step}" width="${step}" height="${step + 0.5}" fill="${grass}"/>`;
+    if (h > 0.85) out += `<rect x="${x}" y="${base - step * 2}" width="${step}" height="${step + 0.5}" fill="${grass}"/>`;
+    for (let r = 1; r < 6; r++) if (hash(i, r + seed) > 0.8) out += `<rect x="${x}" y="${base + r * step * 1.6}" width="${step}" height="${step * 0.6}" fill="${dark}"/>`;
+  }
+  for (let k = 0; k < flowers; k++) {
+    const x = Math.floor(hash(k, seed + 9) * (V / step)) * step, y = base + Math.floor(hash(seed, k + 4) * 6) * step;
+    out += `<rect x="${x}" y="${y - step}" width="${step}" height="${step}" fill="${hash(k, 2) > 0.3 ? '#e8402a' : '#ffe6a0'}"/>`;
+  }
+  return out;
+}
+/** soft god rays falling from the top-left */
+const rays = (n, op) =>
+  Array.from({ length: n }, (_, i) => {
+    const x = -80 + i * (V / n) * 1.3;
+    return `<path d="M${x} -10L${x + 46} -10L${x + 46 + 300} ${V + 10}L${x + 300} ${V + 10}Z" fill="#fff6d0" opacity="${op}"/>`;
+  }).join('');
+/** helmet in side view, brim at the bottom, with leaf sprigs in its net */
+function helmetRows(W, leaves) {
+  if (W <= 10)
+    return ['...HHHH...', '.HHGGGGd..', 'HGGGGGGGd.', 'GGGGGGGGdd', 'gggggggggg'];
+  const rows = [
+    '..................',
+    '......HHHHHH......',
+    '....HHGGGGGGHd....',
+    '...HGGGGGGGGGGd...',
+    '..HGGGGGGGGGGGGd..',
+    '..GGGGGGGGGGGGGd..',
+    '.NNNNNNNNNNNNNNNd.',
+    '.GGGGGGGGGGGGGGGd.',
+    'ggggggggggggggggggg',
+    '....b..............',
+    '.....b.............',
+  ];
+  if (!leaves) return rows.slice(1).map((r) => r.replace(/N/g, 'G'));
+  // leaf sprigs tucked into the helmet band and net
+  const sprig = [[5, 0], [5, 1], [6, 0], [11, 0], [12, 1], [12, 0], [3, 2], [2, 3], [14, 2], [15, 3], [1, 5], [16, 5]];
+  const g = rows.map((r) => r.split(''));
+  for (const [x, y] of sprig) if (g[y][x] === '.') g[y][x] = 'L';
+  return g.map((r) => r.join(''));
+}
+const HELMET_PAL = { G: 0x667a3a, H: 0x8ea055, d: 0x55672f, N: 0x3d4721, g: 0x3e4a22, b: 0x5a4632, L: 0x7cc35a, l: 0x7cc35a };
+
 // ---------- designs ----------
 const DESIGNS = {
+  meadow: {
+    defs: `<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f6d79a"/><stop offset=".55" stop-color="#c9d6a4"/><stop offset="1" stop-color="#8fb27a"/></linearGradient>`,
+    bg: (small) => {
+      const st = small ? 24 : 12;
+      return `<rect width="${V}" height="${V}" fill="url(#bg)"/>${pixelSun(V * 0.72, V * 0.3, V * 0.13, st, '#fff1c8')}
+        ${pines(V * 0.6, st, '#8aa883', 11)}${pines(V * 0.68, st, '#4f7a4f', 5)}${small ? '' : rays(4, 0.08)}
+        ${meadow(V * 0.72, st, { flowers: small ? 0 : 18, seed: 4 })}`;
+    },
+    art(small) {
+      let out = voxels(helmetRows(18, !small), HELMET_PAL, { cx: V * 0.5, cy: V * 0.58, w: V * 0.66, jitter: small ? 0 : 0.06 }).svg;
+      if (!small) {
+        // poppies in the foreground
+        const poppy = ['.R.', 'RYR', '.R.', '.S.', '.S.'];
+        for (const [x, y, w] of [[0.16, 0.8, 0.07], [0.8, 0.83, 0.06], [0.7, 0.86, 0.05]])
+          out += voxels(poppy, { R: 0xe8402a, Y: 0x2a1f1a, S: 0x3f7d34 }, { cx: V * x, cy: V * y, w: V * w, jitter: 0, outline: false }).svg;
+      }
+      return out;
+    },
+  },
+
+  marker: {
+    defs: `<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3a3f5e"/><stop offset=".45" stop-color="#b8664a"/><stop offset=".7" stop-color="#f2a65a"/><stop offset="1" stop-color="#f7cf86"/></linearGradient>`,
+    bg: (small) => {
+      const st = small ? 24 : 12;
+      return `<rect width="${V}" height="${V}" fill="url(#bg)"/>${pixelSun(V * 0.5, V * 0.66, V * 0.2, st, '#ffd88a')}
+        ${pines(V * 0.74, st, '#5a4a52', 21)}${pines(V * 0.8, st, '#2e2a33', 8)}
+        ${meadow(V * 0.82, st, { grass: '#2f3a2a', dark: '#232b20', flowers: 0, seed: 6 })}`;
+    },
+    art(small) {
+      const rifle = [
+        '...WW...',
+        '...WW...',
+        '...WWW..',
+        '...KK...',
+        '...KKKK.',
+        '...KK.KK',
+        '...KK.KK',
+        '...KK...',
+        '...WW...',
+        '...WW...',
+        '...WW...',
+        '....K...',
+        '....K...',
+        '....K...',
+      ];
+      const pal = { W: 0x6e4a2e, K: 0x2b2f2a };
+      const u = V * 0.8 / 22;
+      let out = voxels(rifle, pal, { cx: V * 0.5 + u * 0.4, cy: V * 0.66, w: 8.4 * u, jitter: 0 }).svg;
+      out += voxels(helmetRows(10, false), HELMET_PAL, { cx: V * 0.5 + u * 0.3, cy: V * 0.66 - 8.4 * u, w: 9 * u, jitter: 0 }).svg;
+      return out;
+    },
+  },
+
+  forest: {
+    defs: `<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#cfe0c0"/><stop offset=".6" stop-color="#8fb08a"/><stop offset="1" stop-color="#4c6b48"/></linearGradient>
+      <linearGradient id="fog" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f2f6e8" stop-opacity="0"/><stop offset=".55" stop-color="#f2f6e8" stop-opacity=".5"/><stop offset="1" stop-color="#f2f6e8" stop-opacity="0"/></linearGradient>`,
+    bg: (small) => {
+      const st = small ? 24 : 12;
+      let t = '';
+      // pine trunks at three depths
+      for (const [x, w, c] of [[40, 18, '#7d9a78'], [150, 14, '#7d9a78'], [400, 16, '#7d9a78'], [470, 12, '#7d9a78'], [90, 28, '#4a6545'], [350, 30, '#4a6545'], [10, 40, '#2c3d2a'], [450, 44, '#2c3d2a']])
+        t += `<rect x="${x}" y="0" width="${w}" height="${V}" fill="${c}"/>`;
+      return `<rect width="${V}" height="${V}" fill="url(#bg)"/>${pines(V * 0.62, st, '#a5bf9d', 2)}${t}
+        <rect y="${V * 0.35}" width="${V}" height="${V * 0.5}" fill="url(#fog)"/>${small ? '' : rays(5, 0.1)}
+        ${meadow(V * 0.84, st, { grass: '#3f5e36', dark: '#2f4a29', flowers: small ? 0 : 6, seed: 12 })}`;
+    },
+    art(small) {
+      const rows = [
+        '......HHH.........',
+        '.....HHHHH........',
+        '....HHHHHHH.......',
+        '.....SSSS.........',
+        '.....SSSS.....R...',
+        '......SS.....R....',
+        '...BBBBBBBB.R.....',
+        '..BBBBBBBBBRR.....',
+        '..BBBBBBBBRBB.....',
+        '..BB.BBBBRBBBB....',
+        '..BB.BBBRBB.BB....',
+        '..SS.BBRBBB.SS....',
+        '.....BRBBB........',
+        '.....BBBBB........',
+        '.....BB.BB........',
+        '.....BB..BB.......',
+        '....BB...BB.......',
+        '...BBB...BBB......',
+      ];
+      const pal = { H: 0x2e3524, S: 0x232a1f, B: 0x2a3122, R: 0x15190f };
+      return voxels(rows, pal, { cx: V * 0.52, cy: V * 0.62, w: V * 0.5, depth: 0.3, jitter: 0 }).svg;
+    },
+  },
+
   grenade: {
     defs: `<radialGradient id="bg" cx="50%" cy="42%" r="80%"><stop offset="0" stop-color="#ffcf5a"/><stop offset=".5" stop-color="#f08a2c"/><stop offset="1" stop-color="#7a2a12"/></radialGradient>`,
     bg: (small) => {
