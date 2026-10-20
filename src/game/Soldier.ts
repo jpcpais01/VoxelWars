@@ -156,6 +156,9 @@ export class Soldier {
     return s;
   }
 
+  /** extra cone for bots (set from their skill), 1 for the player */
+  spreadMul = 1;
+
   spread(): number {
     const w = this.weapon;
     const s = w.stats;
