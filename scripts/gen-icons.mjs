@@ -1,5 +1,8 @@
 // Generates every VoxelWars app icon from chunky extruded voxel pixel art.
-// Three designs live here; ICON=<name> picks one (default below):
+// Several designs live here; ICON=<name> picks one (default below):
+//   grenade a pineapple frag grenade on an orange sunburst
+//   tank    a little voxel tank under a blue sky
+//   boom    a spiky voxel explosion throwing blocks
 //   helmet  a voxel soldier in a combat helmet with goggles, in front of a setting voxel sun
 //   vw      a bold "VW" monogram in the team colours, one corner shot to bits
 //   rifle   a carbine silhouette across a striped voxel sunset over the pines
@@ -9,7 +12,7 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 
-const DESIGN = process.env.ICON || 'helmet';
+const DESIGN = process.env.ICON || 'grenade';
 const V = 512;
 
 const hexToRgb = (h) => [(h >> 16) & 255, (h >> 8) & 255, h & 255];
@@ -94,8 +97,122 @@ const COMMON_DEFS = `
 <radialGradient id="vignette" cx="50%" cy="48%" r="75%"><stop offset=".6" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".4"/></radialGradient>
 <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".16"/><stop offset=".5" stop-color="#fff" stop-opacity="0"/></linearGradient>`;
 
+/** build pixel rows from a function (x, y) -> char */
+const grid = (w, h, fn) => Array.from({ length: h }, (_, y) => Array.from({ length: w }, (_, x) => fn(x, y) || '.').join(''));
+
 // ---------- designs ----------
 const DESIGNS = {
+  grenade: {
+    defs: `<radialGradient id="bg" cx="50%" cy="42%" r="80%"><stop offset="0" stop-color="#ffcf5a"/><stop offset=".5" stop-color="#f08a2c"/><stop offset="1" stop-color="#7a2a12"/></radialGradient>`,
+    bg: (small) => {
+      // sunburst rays
+      let r = '';
+      if (!small) for (let i = 0; i < 16; i++) {
+        const a0 = (i / 16) * Math.PI * 2, a1 = a0 + Math.PI / 16;
+        r += `<path d="M256 236L${256 + Math.cos(a0) * 600} ${236 + Math.sin(a0) * 600}L${256 + Math.cos(a1) * 600} ${236 + Math.sin(a1) * 600}Z" fill="#fff" opacity=".09"/>`;
+      }
+      return `<rect width="${V}" height="${V}" fill="url(#bg)"/>${r}`;
+    },
+    art(small) {
+      const W = small ? 10 : 16, H = small ? 13 : 21, top = small ? 3 : 5;
+      const cx = (W - 1) / 2;
+      const rows = grid(W, H, (x, y) => {
+        if (y < top) {
+          // fuse head: lever + cap, ring on the right
+          const capL = Math.round(cx - (small ? 1 : 2)), capR = Math.round(cx + (small ? 1 : 2));
+          if (x >= capL && x <= capR && y >= (small ? 1 : 2)) return y === top - 1 ? 'k' : 'M';
+          if (y === 0 && x >= capL - 1 && x <= capR) return 'L';
+          if (y <= 1 && x >= capL && x <= capR + 1) return 'L';
+          if (!small) {
+            const rx = x - (capR + 3.5), ry = y - 2.2;
+            const d = Math.hypot(rx / 1.8, ry / 1.8);
+            if (d > 0.6 && d < 1.25) return 'R';
+          }
+          return null;
+        }
+        const yy = y - top, bh = H - top;
+        const nx = (x - cx) / (W / 2), ny = (yy - (bh - 1) / 2) / (bh / 2);
+        if (nx * nx + ny * ny > 1.02) return null;
+        const groove = small ? (x % 3 === 1 || yy % 3 === 2) : (Math.round(x - cx + 0.5) % 4 === 0 || yy % 4 === 3);
+        if (groove) return 'g';
+        if (nx < -0.2 && ny < 0.1) return 'H';
+        if (nx > 0.45 || ny > 0.6) return 'd';
+        return 'G';
+      });
+      const pal = { G: 0x6f8a3a, H: 0x9db85c, g: 0x3f5223, d: 0x56702c, M: 0x8c8f94, k: 0x4a4d52, L: 0xb8bcc2, R: 0xd9dde2 };
+      return voxels(rows, pal, { cx: V / 2, cy: V * 0.5, w: small ? V * 0.6 : V * 0.6, jitter: small ? 0 : 0.05 }).svg;
+    },
+  },
+
+  tank: {
+    defs: `<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5ab0e8"/><stop offset=".62" stop-color="#bfe3f0"/><stop offset=".62" stop-color="#7cc35a"/><stop offset="1" stop-color="#3f7d34"/></linearGradient>`,
+    bg: (small) => {
+      let c = '';
+      if (!small) for (const [x, y, w] of [[60, 90, 120], [330, 60, 140], [250, 150, 90]]) c += `<rect x="${x}" y="${y}" width="${w}" height="26" fill="#fff" opacity=".8"/><rect x="${x + 22}" y="${y - 20}" width="${w * 0.5}" height="22" fill="#fff" opacity=".8"/>`;
+      return `<rect width="${V}" height="${V}" fill="url(#bg)"/>${c}`;
+    },
+    art(small) {
+      const rows = small
+        ? [
+            '....TTTT......',
+            '...TTTTTTBBBBB',
+            '.HHHHHHHHHHH..',
+            'DDDDDDDDDDDDD.',
+            '.KWKWKWKWKWK..',
+            '..KKKKKKKKK...',
+          ]
+        : [
+            '..........tTTTTTt.............',
+            '.........TTTTTTTTT............',
+            '........TTTSTTTTTTTBBBBBBBBBBB',
+            '........TTTTTTTTTTTbbbbbbbbbbb',
+            '...HHHHHHHHHHHHHHHHHHHHHHH....',
+            '..HHHHHHHHHHHHHHHHHHHHHHHHH...',
+            '.DDDDDDDDDDDDDDDDDDDDDDDDDDD..',
+            'DDDDDDDDDDDDDDDDDDDDDDDDDDDDD.',
+            '.KKKKKKKKKKKKKKKKKKKKKKKKKKK..',
+            'KKWWKKWWKKWWKKWWKKWWKKWWKKWWK.',
+            'KKWWKKWWKKWWKKWWKKWWKKWWKKWWK.',
+            '.KKKKKKKKKKKKKKKKKKKKKKKKKKK..',
+          ];
+      const pal = { T: 0x7f9a44, t: 0x9db85c, S: 0x3d8bff, B: 0x55642f, b: 0x3d4822, H: 0x8fab4e, D: 0x627a33, K: 0x2b2f2a, W: 0x8a8f86 };
+      return voxels(rows, pal, { cx: V / 2, cy: V * 0.55, w: V * 0.86, jitter: small ? 0 : 0.05 }).svg;
+    },
+  },
+
+  boom: {
+    defs: `<radialGradient id="bg" cx="50%" cy="50%" r="75%"><stop offset="0" stop-color="#3a2a6e"/><stop offset="1" stop-color="#0d0a22"/></radialGradient>`,
+    bg: () => `<rect width="${V}" height="${V}" fill="url(#bg)"/>`,
+    art(small) {
+      const N = small ? 11 : 23, c = (N - 1) / 2;
+      const rows = grid(N, N, (x, y) => {
+        const dx = x - c, dy = y - c;
+        const a = Math.atan2(dy, dx);
+        // spiky burst outline
+        const spikes = 1 + 0.32 * Math.cos(a * 7) + (small ? 0 : 0.08 * Math.cos(a * 13 + 1));
+        const r = Math.hypot(dx, dy) / (c * spikes);
+        if (r > 1) return null;
+        if (r < 0.3) return 'W';
+        if (r < 0.55) return 'Y';
+        if (r < 0.8) return 'O';
+        return 'R';
+      });
+      const pal = { W: 0xfff8e0, Y: 0xffd23f, O: 0xff8a1f, R: 0xe8402a };
+      let out = voxels(rows, pal, { cx: V / 2, cy: V / 2, w: V * 0.74, depth: 0.35, jitter: small ? 0 : 0.06 }).svg;
+      if (!small) {
+        // blasted blocks flying out
+        const chips = [[60, 90, 34, 0x86d45c], [420, 70, 28, 0x9a6a43], [440, 400, 36, 0x9aa2ad], [70, 410, 26, 0x86d45c], [250, 30, 22, 0x9a6a43], [470, 240, 20, 0x9aa2ad], [30, 250, 22, 0x9a6a43]];
+        for (const [x, y, z, col] of chips) {
+          const c0 = hexToRgb(col), d = z * 0.4;
+          out += quad([[x, y], [x + z, y], [x + z + d, y - d], [x + d, y - d]], rgb(mul(c0, 1.2))) +
+            quad([[x + z, y], [x + z + d, y - d], [x + z + d, y + z - d], [x + z, y + z]], rgb(mul(c0, 0.62))) +
+            `<rect x="${x}" y="${y}" width="${z}" height="${z}" fill="${rgb(c0)}"/>`;
+        }
+      }
+      return out;
+    },
+  },
+
   helmet: {
     defs: `<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#2a1b4a"/><stop offset=".45" stop-color="#c2415a"/><stop offset=".75" stop-color="#ff8a3d"/><stop offset="1" stop-color="#ffc861"/></linearGradient>`,
