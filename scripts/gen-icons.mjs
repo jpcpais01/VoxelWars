@@ -1,5 +1,7 @@
 // Generates every VoxelWars app icon from chunky extruded voxel pixel art.
 // Several designs live here; ICON=<name> picks one (default below):
+//   valley  an in-engine render of the ruined island tower in the lake, morning light
+//   golden  the same valley from higher up in golden-hour haze
 //   forest  a soldier silhouette with a rifle among misty pine trunks and sunbeams
 //   meadow  a combat helmet with leaf sprigs resting in a poppy meadow below the pines
 //   marker  a rifle planted in the ground with a helmet on it, pines against a dusk sun
@@ -11,11 +13,11 @@
 //   rifle   a carbine silhouette across a striped voxel sunset over the pines
 // Emitted as SVG, rasterised with Chromium (Playwright).
 //   npm run icons            (needs `playwright` resolvable, e.g. NODE_PATH to a global install)
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 
-const DESIGN = process.env.ICON || 'forest';
+const DESIGN = process.env.ICON || 'valley';
 const V = 512;
 
 const hexToRgb = (h) => [(h >> 16) & 255, (h >> 8) & 255, h & 255];
@@ -150,8 +152,27 @@ function helmetRows(W, leaves) {
 }
 const HELMET_PAL = { G: 0x667a3a, H: 0x8ea055, d: 0x55672f, N: 0x3d4721, g: 0x3e4a22, b: 0x5a4632, L: 0x7cc35a, l: 0x7cc35a };
 
+/** a design built from an engine screenshot: crop centre (px of the 768 source) and zoom per size class */
+function photo(file, crops) {
+  const data = readFileSync(new URL(`./icon-art/${file}`, import.meta.url)).toString('base64');
+  return {
+    defs: '',
+    bg: (small) => {
+      const [cx, cy, z] = small ? crops.small : crops.any;
+      const k = (V / 768) * z;
+      return `<image href="data:image/jpeg;base64,${data}" width="768" height="768" preserveAspectRatio="none"
+        transform="translate(${V / 2} ${V / 2}) scale(${k}) translate(${-cx} ${-cy})"/>`;
+    },
+    art: () => '',
+  };
+}
+
 // ---------- designs ----------
 const DESIGNS = {
+  // real in-engine renders of Pinewater Valley (scripts/icon-art, made with render-shots.cjs)
+  valley: photo('valley.jpg', { any: [384, 360, 1.12], small: [392, 330, 2.1] }),
+  golden: photo('valley-golden.jpg', { any: [384, 384, 1.0], small: [370, 290, 1.9] }),
+
   meadow: {
     defs: `<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f6d79a"/><stop offset=".55" stop-color="#c9d6a4"/><stop offset="1" stop-color="#8fb27a"/></linearGradient>`,
     bg: (small) => {
