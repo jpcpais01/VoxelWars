@@ -33,11 +33,22 @@ interface Settings {
   difficulty: Difficulty;
   lighting: LightingId;
   minutes: number;
+  view: ViewSetting;
 }
+type ViewId = 'near' | 'medium' | 'far' | 'max';
+type ViewSetting = ViewId | 'auto';
+/** render distance presets: how far you see, how far full detail and sun shadows reach */
+const VIEW: Record<ViewId, { dist: number; lod: number; shadow: number }> = {
+  near: { dist: 70, lod: 0.85, shadow: 36 },
+  medium: { dist: 110, lod: 0.92, shadow: 40 },
+  far: { dist: 170, lod: 1, shadow: 44 },
+  max: { dist: 400, lod: 1.1, shadow: 50 },
+};
+const VIEW_AUTO: Record<Quality, ViewId> = { low: 'near', medium: 'medium', high: 'far', ultra: 'max' };
 const SETTINGS_KEY = 'voxelwars.settings.v1';
 const coarse = matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
 function loadSettings(): Settings {
-  const def: Settings = { quality: 'auto', volume: 0.8, zoom: 1, sens: 1, fov: 90, fps: false, difficulty: 'regular', lighting: 'morning', minutes: 15 };
+  const def: Settings = { quality: 'auto', volume: 0.8, zoom: 1, sens: 1, fov: 90, fps: false, difficulty: 'regular', lighting: 'morning', minutes: 15, view: 'auto' };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) return { ...def, ...JSON.parse(raw) };
@@ -58,6 +69,18 @@ function resolvedQuality(): Quality {
   if (settings.quality !== 'auto') return settings.quality;
   const small = Math.min(screen.width, screen.height) < 700;
   return coarse || small ? 'medium' : 'high';
+}
+function resolvedView(): ViewId {
+  return settings.view === 'auto' ? VIEW_AUTO[resolvedQuality()] : settings.view;
+}
+/** In a match the render distance setting rules; the menu flyover always shows the whole valley. */
+function applyView() {
+  if (!chunks) return;
+  const v = VIEW[state === 'playing' ? resolvedView() : 'max'];
+  renderer.setViewDistance(v.dist);
+  chunks.viewDist = state === 'playing' ? v.dist : Infinity;
+  chunks.lodScale = renderer.q.lod * v.lod;
+  if (state === 'playing') renderer.shadowExtent = v.shadow;
 }
 
 // ------------------------------------------------------------------------------------ career
@@ -154,7 +177,7 @@ async function boot() {
   await progress(0.92, 'Baking sky light');
   await chunks.buildSky();
   chunks.setGrass(renderer.q.grass);
-  chunks.lodScale = renderer.q.lod;
+  applyView();
   chunks.setView(renderer.camera.position);
   const water = new Water(world);
   water.setFlow(info.flow);
@@ -352,8 +375,20 @@ $('lo-done').addEventListener('click', () => editor.close());
 
 // settings panel
 const qualityBtns = $('set-quality').querySelectorAll<HTMLButtonElement>('button');
+const viewBtns = $('set-view').querySelectorAll<HTMLButtonElement>('button');
 function syncSettingsUI() {
-  qualityBtns.forEach((b) => b.classList.toggle('on', b.dataset.q === settings.quality));
+  viewBtns.forEach((b) =>
+  b.addEventListener('click', () => {
+    settings.view = b.dataset.v as ViewSetting;
+    audio.uiClick();
+    syncSettingsUI();
+    applySettings();
+  }),
+);
+qualityBtns.forEach((b) => b.classList.toggle('on', b.dataset.q === settings.quality));
+  viewBtns.forEach((b) => b.classList.toggle('on', b.dataset.v === settings.view));
+  const vd = VIEW[resolvedView()].dist;
+  $('view-val').textContent = vd >= 400 ? 'whole valley' : `${vd} m`;
   $<HTMLInputElement>('set-volume').value = String(settings.volume);
   $<HTMLInputElement>('set-sens').value = String(settings.sens);
   $<HTMLInputElement>('set-fov').value = String(settings.fov);
@@ -366,8 +401,8 @@ function applySettings() {
   if (q !== renderer.quality) {
     renderer.setQuality(q);
     chunks?.setGrass(renderer.q.grass);
-    if (chunks) chunks.lodScale = renderer.q.lod;
   }
+  applyView();
   audio.setVolume(settings.volume);
   if (game?.pc) {
     game.pc.sensitivity = settings.sens;
@@ -508,7 +543,6 @@ function deploy() {
   state = 'playing';
   $('menu').classList.add('hidden');
   $('hud').classList.remove('hidden');
-  renderer.shadowExtent = 44;
   renderer.shadowForce = true;
   renderer.tiltShift = false;
   game.start('You', JSON.parse(JSON.stringify(editor.loadout)), { difficulty: settings.difficulty, minutes: settings.minutes });

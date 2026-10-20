@@ -31,6 +31,8 @@ interface Chunk {
   grassVer: number;
   busy: number;
   near: boolean;
+  /** wholly beyond the render distance: hidden and not rebuilt until it comes back in range */
+  culled: boolean;
 }
 
 interface ChunkResult {
@@ -58,8 +60,10 @@ export class ChunkManager {
   private chunks: Chunk[] = [];
   grassEnabled = true;
   totalVerts = 0;
-  /** detail distance multiplier (quality setting) */
+  /** detail distance multiplier (quality and render distance settings) */
   lodScale = 1;
+  /** chunks whose nearest point is further than this (metres) are not drawn */
+  viewDist = Infinity;
   private view: THREE.Vector3 | null = null;
 
   private workers: Worker[] = [];
@@ -93,6 +97,7 @@ export class ChunkManager {
           grassVer: -1,
           busy: 0,
           near: false,
+          culled: false,
         });
     this.skyData.fill(255);
     this.skyTex = new THREE.Data3DTexture(this.skyData, SKY_W, SKY_D, SKY_H);
@@ -284,7 +289,7 @@ export class ChunkManager {
       }
     if (show === c.shown) return;
     if (c.shown >= 0 && c.slots[c.shown]) c.slots[c.shown]!.visible = false;
-    if (show >= 0) c.slots[show]!.visible = true;
+    if (show >= 0) c.slots[show]!.visible = !c.culled;
     c.shown = show;
   }
 
@@ -388,8 +393,13 @@ export class ChunkManager {
         for (let l = 1; l < LOD_LEVELS; l++) if (d > LOD_START[l] * k + (c.shown >= 0 ? (c.shown >= l ? -2.5 : 2.5) : 0)) want = l;
       } else c.dist = 1e9;
       c.want = want;
+      const culled = c.dist > this.viewDist;
+      if (culled !== c.culled) {
+        c.culled = culled;
+        if (c.shown >= 0) c.slots[c.shown]!.visible = !culled;
+      }
       this.pickShown(c);
-      if (c.shown >= 0) verts += c.slots[c.shown]!.geometry.getAttribute('position').count;
+      if (c.shown >= 0 && !culled) verts += c.slots[c.shown]!.geometry.getAttribute('position').count;
       // drop full-detail meshes well behind the camera's detail ring
       if (v && c.slots[0] && c.dist > LOD_START[1] * k + 30) {
         const m = c.slots[0]!;
@@ -399,7 +409,7 @@ export class ChunkManager {
         c.slotVer[0] = -1;
         this.pickShown(c);
       }
-      if (c.busy) continue;
+      if (c.busy || culled) continue;
       let lods = 0;
       let p = c.dist;
       if (c.slotVer[want] !== c.ver) lods |= 1 << want;
