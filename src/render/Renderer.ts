@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { MAP_D, MAP_W } from '../core/config';
+import { MAP_D, MAP_W, WATER_Y } from '../core/config';
 import { BrightShader, CompositeShader, CopyDepthShader, DownCocShader, DownShader, FsPass, UpShader, makePass } from './post';
 import { shared } from './shaderlib';
 import { Water } from './water';
@@ -15,13 +15,51 @@ interface QualityDef {
   ssr: boolean;
   grass: boolean;
   fxaa: boolean;
+  /** re-render the sun's shadow map every N frames (the light matrix stays paired with its map) */
+  shadowEvery: number;
 }
 
+export type LightingId = 'morning' | 'golden' | 'overcast';
+interface LightingDef {
+  label: string;
+  sunDir: [number, number, number];
+  sun: number;
+  sunI: number;
+  sky: number;
+  ground: number;
+  hemiI: number;
+  fog: number;
+  sunFog: number;
+  mist: number;
+  mistCol: number;
+  skyTop: number;
+  skyHor: number;
+  exposure: number;
+  shadowRadius: number;
+}
+export const LIGHTING: Record<LightingId, LightingDef> = {
+  morning: {
+    label: 'Morning',
+    sunDir: [-0.55, 0.68, 0.48], sun: 0xffe9c9, sunI: 3.25, sky: 0xbcd8ff, ground: 0x627040, hemiI: 1.4,
+    fog: 0x9fbcc4, sunFog: 0xf3d7a6, mist: 1, mistCol: 0xd9e6e4, skyTop: 0x5d9ad6, skyHor: 0xcfe3ea, exposure: 1, shadowRadius: 2.5,
+  },
+  golden: {
+    label: 'Golden hour',
+    sunDir: [-0.78, 0.4, 0.48], sun: 0xffbe7d, sunI: 3.4, sky: 0x9db6e8, ground: 0x6e5a36, hemiI: 1.15,
+    fog: 0xc9a98a, sunFog: 0xffb36b, mist: 1.35, mistCol: 0xf0d2b0, skyTop: 0x6f93cf, skyHor: 0xf6c99a, exposure: 1.06, shadowRadius: 3,
+  },
+  overcast: {
+    label: 'Overcast',
+    sunDir: [-0.3, 0.88, 0.36], sun: 0xe8eef2, sunI: 1.25, sky: 0xc9d6e2, ground: 0x5d6650, hemiI: 2.25,
+    fog: 0x9aa7ad, sunFog: 0xb9c2c4, mist: 1.6, mistCol: 0xc8d2d4, skyTop: 0x8a9aa8, skyHor: 0xc2ccd1, exposure: 1.08, shadowRadius: 6,
+  },
+};
+
 export const QUALITY: Record<Quality, QualityDef> = {
-  low: { scale: 0.75, maxDpr: 1, shadow: 1024, bloom: false, dof: false, ssr: false, grass: false, fxaa: true },
-  medium: { scale: 1, maxDpr: 1.25, shadow: 1536, bloom: true, dof: false, ssr: false, grass: true, fxaa: true },
-  high: { scale: 1, maxDpr: 1.5, shadow: 2048, bloom: true, dof: true, ssr: true, grass: true, fxaa: true },
-  ultra: { scale: 1, maxDpr: 2, shadow: 4096, bloom: true, dof: true, ssr: true, grass: true, fxaa: true },
+  low: { scale: 0.75, maxDpr: 1, shadow: 1024, bloom: false, dof: false, ssr: false, grass: false, fxaa: true, shadowEvery: 2 },
+  medium: { scale: 1, maxDpr: 1.25, shadow: 1536, bloom: true, dof: false, ssr: false, grass: true, fxaa: true, shadowEvery: 2 },
+  high: { scale: 1, maxDpr: 1.5, shadow: 2048, bloom: true, dof: true, ssr: true, grass: true, fxaa: true, shadowEvery: 1 },
+  ultra: { scale: 1, maxDpr: 2, shadow: 4096, bloom: true, dof: true, ssr: true, grass: true, fxaa: true, shadowEvery: 1 },
 };
 
 export class Renderer {
@@ -29,13 +67,13 @@ export class Renderer {
   readonly scene = new THREE.Scene();
   readonly fxScene = new THREE.Scene();
   readonly camera = new THREE.PerspectiveCamera(32, 1, 0.5, 420);
-  readonly sun = new THREE.DirectionalLight(0xfff0d6, 3.1);
+  readonly sun = new THREE.DirectionalLight(0xffe9c9, 3.25);
   /** Twin of the sun living in the effects scene; shares the shadow map so water receives shadows. */
-  private fxSun = new THREE.DirectionalLight(0xfff0d6, 3.1);
-  readonly hemi = new THREE.HemisphereLight(0xbcd8ff, 0x5c6b3a, 1.15);
+  private fxSun = new THREE.DirectionalLight(0xffe9c9, 3.25);
+  readonly hemi = new THREE.HemisphereLight(0xbcd8ff, 0x627040, 1.4);
   readonly flashes: THREE.PointLight[] = [];
   private flashLife: number[] = [];
-  readonly sunDir = new THREE.Vector3(-0.52, 0.78, 0.36).normalize();
+  readonly sunDir = new THREE.Vector3(-0.55, 0.68, 0.48).normalize();
   water!: Water;
 
   private rtMain!: THREE.WebGLRenderTarget;
@@ -134,8 +172,42 @@ export class Renderer {
       uFlash: { value: 0 },
       uDesat: { value: 0 },
       uFxaa: { value: 1 },
+      uMist: { value: 1 },
+      uMistY: { value: WATER_Y + 0.25 },
+      uMistCol: { value: new THREE.Color(0xd9e6e4) },
     });
     this.addSkirt();
+  }
+
+  private frameNo = 0;
+  /** set when the shadow frustum jumps (menu -> match) so the next frame refreshes the map */
+  shadowForce = true;
+  lighting: LightingId = 'morning';
+
+  setLighting(id: LightingId) {
+    const L = LIGHTING[id];
+    this.lighting = id;
+    this.sunDir.set(...L.sunDir).normalize();
+    for (const s of [this.sun, this.fxSun]) {
+      s.color.setHex(L.sun);
+      s.intensity = L.sunI;
+    }
+    this.sun.shadow.radius = L.shadowRadius;
+    this.hemi.color.setHex(L.sky);
+    this.hemi.groundColor.setHex(L.ground);
+    this.hemi.intensity = L.hemiI;
+    (this.scene.background as THREE.Color).setHex(L.fog);
+    const c = this.compMat.uniforms;
+    c.uFogCol.value.setHex(L.fog);
+    c.uSunFog.value.setHex(L.sunFog);
+    c.uMist.value = L.mist;
+    c.uMistCol.value.setHex(L.mistCol);
+    c.uExposure.value = L.exposure;
+    if (this.water) {
+      this.water.uniforms.uSkyTop.value.setHex(L.skyTop);
+      this.water.uniforms.uSkyHor.value.setHex(L.skyHor);
+    }
+    this.shadowForce = true;
   }
 
   setWater(w: Water) {
@@ -332,7 +404,11 @@ export class Renderer {
     gl.setRenderTarget(this.rtMain);
     gl.setClearColor(this.scene.background as THREE.Color, 1);
     gl.clear(true, true, false);
-    gl.shadowMap.needsUpdate = true;
+    // under load, refresh shadows on alternate frames (dynamic resolution already fell back)
+    const every = this.dynScale < 0.8 ? Math.max(2, this.q.shadowEvery) : this.q.shadowEvery;
+    this.frameNo++;
+    gl.shadowMap.needsUpdate = this.frameNo % every === 0 || this.shadowForce;
+    this.shadowForce = false;
     gl.render(this.scene, cam);
 
     // 2. refraction source (half res colour + linear depth)

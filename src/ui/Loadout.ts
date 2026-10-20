@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { buildGunGeometry, toyMaterial } from '../game/models';
+import { buildGunGeometry, previewMaterial } from '../game/models';
 import { ATT, Build, ITEMS, ItemId, Loadout, SLOT_NAMES, Slot, WEAPON, WEAPONS, computeStats, defaultBuild, ratings } from '../game/weapons';
 
 const KEY = 'voxelwars.loadout.v1';
@@ -128,7 +128,7 @@ export class LoadoutEditor {
       this.gun.geometry = geo;
       this.gun.visible = true;
     } else {
-      this.gun = new THREE.Mesh(geo, toyMaterial);
+      this.gun = new THREE.Mesh(geo, previewMaterial);
       this.scene.add(this.gun);
     }
     this.gun.scale.setScalar(1.25 / Math.max(0.4, size));

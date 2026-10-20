@@ -28,6 +28,8 @@ export interface MapInfo {
   riverZ: (xMetres: number) => number;
   waterMask: Uint8Array;
   menuOrbit: V2;
+  /** water flow field, (WX/2) x (WZ/2) texels, RG = flow x/z * 0.5 + 0.5, index i * (WZ/2) + j */
+  flow: Uint8Array;
 }
 
 const C = (WX - 1) / 2; // 191.5
@@ -884,7 +886,58 @@ export async function generateWorld(world: World, seed: number, progress: Prog):
   ];
   const lanesRed = lanesBlue.map((l) => [...l.slice(0, -1).map(mirM), blueCore]);
 
+  // ---------------------------------------------------------------- water flow field
+  // the river runs west to east; the lake turns it into a slow swirl around the island
+  const FW = WX >> 1, FD = WZ >> 1;
+  const fx = new Float32Array(FW * FD), fz = new Float32Array(FW * FD);
+  for (let i = 0; i < FW; i++)
+    for (let j = 0; j < FD; j++) {
+      const x = i * 2 + 1, z = j * 2 + 1;
+      const slope = (riverZ(x + 1) - riverZ(x - 1)) * 0.5;
+      const inv = 1 / Math.sqrt(1 + slope * slope);
+      const hw = riverHW(x);
+      const rd = riverDist(x, z);
+      const narrow = clamp(8.5 / hw, 0.7, 1.35);
+      const along = clamp(1 - Math.pow(rd / (hw + 2.5), 2), 0, 1) * narrow;
+      let vx = inv * along, vz = slope * inv * along;
+      const ld = lakeD(x, z);
+      const lw = 1 - smoothstep(0.75, 1.25, ld);
+      if (lw > 0) {
+        const dx = x - C, dz = z - C;
+        const r = Math.hypot(dx, dz) + 1e-3;
+        let lx = 0.45 + (-dz / r) * 0.35, lz = (dx / r) * 0.35;
+        const isl = islandD(x, z);
+        if (isl < 2.2) {
+          const push = (2.2 - isl) * 0.4;
+          lx += (dx / r) * push;
+          lz += (dz / r) * push;
+        }
+        vx = lerp(vx, lx * 0.55, lw);
+        vz = lerp(vz, lz * 0.55, lw);
+      }
+      fx[i * FD + j] = vx;
+      fz[i * FD + j] = vz;
+    }
+  const flow = new Uint8Array(FW * FD * 2);
+  for (let i = 0; i < FW; i++)
+    for (let j = 0; j < FD; j++) {
+      // 5x5 box blur keeps the field smooth across banks
+      let sx = 0, sz = 0, n = 0;
+      for (let a = -2; a <= 2; a++)
+        for (let b = -2; b <= 2; b++) {
+          const ii = i + a, jj = j + b;
+          if (ii < 0 || jj < 0 || ii >= FW || jj >= FD) continue;
+          sx += fx[ii * FD + jj];
+          sz += fz[ii * FD + jj];
+          n++;
+        }
+      const k = i * FD + j;
+      flow[k * 2] = Math.round(clamp(sx / n * 0.5 + 0.5, 0, 1) * 255);
+      flow[k * 2 + 1] = Math.round(clamp(sz / n * 0.5 + 0.5, 0, 1) * 255);
+    }
+
   return {
+    flow,
     cores: [blueCore, redCore],
     coreY: [baseBlue.coreY, baseRed.coreY],
     spawns: [baseBlue.spawns, baseRed.spawns],

@@ -64,6 +64,18 @@ export class Soldier {
   rig: SoldierRig;
   kills = 0;
   deaths = 0;
+  assists = 0;
+  score = 0;
+  headshots = 0;
+  streak = 0;
+  bestStreak = 0;
+  multi = 0;
+  lastKillT = -99;
+  pelletsFired = 0;
+  pelletsHit = 0;
+  voxelsDestroyed = 0;
+  /** enemies who hurt us recently (for assists), value = time of last hit */
+  damagers = new Map<Soldier, number>();
   damageDealt = 0;
   coreDamage = 0;
   lastHurt = -99;

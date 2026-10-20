@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { MAP_D, MAP_W, VOXEL, WATER_Y } from '../core/config';
+import { MAP_D, MAP_W, VOXEL, WATER_Y, WY } from '../core/config';
 import { MAT_COUNT, MATS } from '../world/materials';
 
 /** Uniforms shared by every world material. Mutated once per frame by the renderer. */
@@ -14,6 +14,10 @@ export const shared = {
   uMatParams: { value: [] as THREE.Vector4[] },
   uWaterY: { value: WATER_Y },
   uWind: { value: new THREE.Vector2(0.8, 0.35) },
+  /** baked sky visibility volume (see world/skyLight.ts) */
+  tSky: { value: null as THREE.Texture | null },
+  /** 0 = sky occlusion off (lowest quality), 1 = on */
+  uSkyAmt: { value: 1 },
 };
 
 const KIND = { ground: 0, stone: 1, wood: 2, leaf: 3, build: 4, metal: 5, soft: 6, glow: 7 };
@@ -95,5 +99,17 @@ void applyCutout(float viewZ, float worldY) {
     if (viewZ < uCutB.z - 1.2 && worldY > uCutH.y) keep = min(keep, smoothstep(0.65, 1.0, r));
   }
   if (keep < 0.999 && keep < bayer4(gl_FragCoord.xy)) discard;
+}
+`;
+
+/** Large-scale sky visibility from the baked volume. p in world metres, n the surface normal. */
+export const GLSL_SKY = /* glsl */ `
+uniform highp sampler3D tSky;
+uniform float uSkyAmt;
+float skyVis(vec3 p, vec3 n) {
+  vec3 q = p + n * 0.45;
+  vec3 uvw = vec3(q.x / ${MAP_W.toFixed(2)}, q.z / ${MAP_D.toFixed(2)}, q.y / ${(WY * VOXEL).toFixed(2)});
+  float v = texture(tSky, uvw).r;
+  return mix(1.0, v, uSkyAmt);
 }
 `;

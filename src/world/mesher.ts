@@ -9,10 +9,15 @@ import { M } from './materials';
  * which keeps flat ground cheap while preserving soft contact shadows everywhere.
  */
 
+/**
+ * Packed vertex stream, 8 bytes per vertex:
+ *  positions: x, y, z in whole voxels relative to the volume's interior origin, plus a spare byte
+ *  data: material, AO, face (0..5 = +x,-x,+y,-y,+z,-z), spare
+ * Normals are rebuilt from the face index in the shader, so there is no normal stream at all.
+ */
 export interface MeshData {
-  positions: Float32Array;
-  normals: Int8Array;
-  data: Uint8Array; // mat, ao, face, unused
+  positions: Uint8Array;
+  data: Uint8Array;
   indices: Uint16Array | Uint32Array;
   vertexCount: number;
 }
@@ -24,8 +29,7 @@ export interface GrassData {
 }
 
 class Grow {
-  pos = new Float32Array(1 << 18);
-  nrm = new Int8Array(1 << 18);
+  pos = new Uint8Array(1 << 18);
   dat = new Uint8Array(1 << 18);
   idx = new Uint32Array(1 << 18);
   v = 0;
@@ -35,15 +39,12 @@ class Grow {
     this.i = 0;
   }
   ensure(nv: number, ni: number) {
-    if ((this.v + nv) * 3 > this.pos.length) {
-      const n = Math.max(this.pos.length * 2, (this.v + nv) * 3);
-      const p = new Float32Array(n);
+    if ((this.v + nv) * 4 > this.pos.length) {
+      const n = Math.max(this.pos.length * 2, (this.v + nv) * 4);
+      const p = new Uint8Array(n);
       p.set(this.pos);
       this.pos = p;
-      const q = new Int8Array(n);
-      q.set(this.nrm);
-      this.nrm = q;
-      const d = new Uint8Array(Math.ceil((n / 3) * 4));
+      const d = new Uint8Array(n);
       d.set(this.dat);
       this.dat = d;
     }
@@ -57,37 +58,21 @@ class Grow {
 }
 
 const G = new Grow();
-// ensure data buffer is big enough for 4 bytes/vertex
-G.dat = new Uint8Array((G.pos.length / 3) * 4);
 
 const AO_CURVE = [0, 1, 2, 3];
 
 /**
- * @param vol padded volume, layout (x * sz + z) * sy + y
+ * @param vol padded volume, layout (x * sz + z) * sy + y, interior dimensions at most 255
  * @param sx,sy,sz padded dimensions
- * @param ox,oy,oz world voxel coordinates of interior cell (0,0,0)
- * @param offX,offY,offZ metres subtracted from output positions
+ * Output positions are in voxels relative to interior cell (0,0,0); the mesh transform places them.
  */
-export function greedyMesh(
-  vol: Uint8Array,
-  sx: number,
-  sy: number,
-  sz: number,
-  ox: number,
-  oy: number,
-  oz: number,
-  offX = 0,
-  offY = 0,
-  offZ = 0,
-): MeshData {
+export function greedyMesh(vol: Uint8Array, sx: number, sy: number, sz: number): MeshData {
   G.reset();
   const n = [sx - 2, sy - 2, sz - 2];
   const strides = [sz * sy, 1, sy]; // x, y, z strides in padded volume
   const maxMask = Math.max(n[0] * n[1], n[1] * n[2], n[0] * n[2]);
   const mask = new Int32Array(maxMask);
   const pos = [0, 0, 0];
-  const org = [ox, oy, oz];
-  const off = [offX, offY, offZ];
 
   for (let d = 0; d < 3; d++) {
     const u = (d + 1) % 3;
@@ -151,7 +136,7 @@ export function greedyMesh(
               const row = mi + h * nu;
               for (let k = 0; k < w; k++) if (mask[row + k] !== key) break outer;
             }
-            emitQuad(d, u, v, s, face, i, a, b, w, h, key, org, off);
+            emitQuad(d, u, v, s, face, i, a, b, w, h, key);
             for (let hh = 0; hh < h; hh++) {
               const row = mi + hh * nu;
               for (let k = 0; k < w; k++) mask[row + k] = 0;
@@ -165,11 +150,10 @@ export function greedyMesh(
   }
 
   const vc = G.v;
-  const positions = G.pos.slice(0, vc * 3);
-  const normals = G.nrm.slice(0, vc * 3);
+  const positions = G.pos.slice(0, vc * 4);
   const data = G.dat.slice(0, vc * 4);
   const indices = vc > 65535 ? G.idx.slice(0, G.i) : Uint16Array.from(G.idx.subarray(0, G.i));
-  return { positions, normals, data, indices, vertexCount: vc };
+  return { positions, data, indices, vertexCount: vc };
 }
 
 const cU = [0, 1, 1, 0];
@@ -188,8 +172,6 @@ function emitQuad(
   w: number,
   h: number,
   key: number,
-  org: number[],
-  off: number[],
 ) {
   G.ensure(4, 6);
   const mat = key & 255;
@@ -200,14 +182,11 @@ function emitQuad(
     pp[d] = plane;
     pp[u] = a + cU[c] * w;
     pp[v] = b + cV[c] * h;
-    const vi = G.v * 3;
-    G.pos[vi] = (pp[0] + org[0]) * VOXEL - off[0];
-    G.pos[vi + 1] = (pp[1] + org[1]) * VOXEL - off[1];
-    G.pos[vi + 2] = (pp[2] + org[2]) * VOXEL - off[2];
-    G.nrm[vi] = d === 0 ? s * 127 : 0;
-    G.nrm[vi + 1] = d === 1 ? s * 127 : 0;
-    G.nrm[vi + 2] = d === 2 ? s * 127 : 0;
     const di = G.v * 4;
+    G.pos[di] = pp[0];
+    G.pos[di + 1] = pp[1];
+    G.pos[di + 2] = pp[2];
+    G.pos[di + 3] = 0;
     G.dat[di] = mat;
     G.dat[di + 1] = AO_CURVE[ao[c]] * 85;
     G.dat[di + 2] = face;
@@ -318,9 +297,9 @@ export function grassMesh(
           const px = -Math.sin(ang) * 0.035;
           const pz = Math.cos(ang) * 0.035;
           const shade = 0.75 + hash3(k, wx, wz, 3) * 0.35;
-          push(bx - px, cy, bz - pz, 52 * shade, 96 * shade, 30 * shade, 0);
-          push(bx + px, cy, bz + pz, 52 * shade, 96 * shade, 30 * shade, 0);
-          const tr = Math.min(255, 150 * shade), tg = Math.min(255, 205 * shade), tb = 70 * shade;
+          push(bx - px, cy, bz - pz, 74 * shade, 124 * shade, 40 * shade, 0);
+          push(bx + px, cy, bz + pz, 74 * shade, 124 * shade, 40 * shade, 0);
+          const tr = Math.min(255, 158 * shade), tg = Math.min(255, 212 * shade), tb = Math.min(255, 84 * shade);
           push(bx + Math.cos(ang) * lean, cy + hb, bz + Math.sin(ang) * lean, tr, tg, tb, 255);
         }
         if (m === M.FLOWER_BED || hsh < dens * 0.08) {

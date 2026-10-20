@@ -20,6 +20,7 @@ export class PlayerController {
   private shakeOff = new THREE.Vector3();
   touchAim = new THREE.Vector2(0, -1);
   spectate: Soldier | null = null;
+  private camOff = new THREE.Vector3();
 
   constructor(public s: Soldier, private input: Input, private game: Game) {
     this.focus.copy(s.pos);
@@ -166,8 +167,10 @@ export class PlayerController {
     this.focus.y = damp(this.focus.y, tgt.pos.y, 5, dt);
     this.focus.x = clamp(this.focus.x, 12, g.mapW - 12);
     this.focus.z = clamp(this.focus.z, 10, g.mapD - 6);
-    const zoom = this.zoom * (this.s.ads && this.s.alive ? 1 + Math.min(0.35, w.adsZoom * 0.012) : 1);
-    const off = new THREE.Vector3(0, 27, 12.5).multiplyScalar(zoom);
+    // narrow (portrait) screens pull back so the horizontal view stays playable
+    const narrow = clamp(1.25 / Math.max(0.3, cam.aspect), 1, 1.7);
+    const zoom = this.zoom * narrow * (this.s.ads && this.s.alive ? 1 + Math.min(0.35, w.adsZoom * 0.012) : 1);
+    const off = this.camOff.set(0, 30, 13.5).multiplyScalar(zoom);
     // camera shake
     const sh = g.renderer.shake;
     if (sh > 0.001) {
